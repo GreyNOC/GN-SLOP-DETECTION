@@ -103,8 +103,7 @@ def normalize_website_url(url: str) -> str:
     if len(cleaned) > MAX_URL_LENGTH:
         raise WebsiteFetchError("URL is too long.")
 
-    parsed = urlparse(cleaned)
-    if not parsed.scheme:
+    if "://" not in cleaned:
         cleaned = f"https://{cleaned}"
     return cleaned
 
