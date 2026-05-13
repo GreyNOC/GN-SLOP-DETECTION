@@ -125,6 +125,21 @@ function stopBackend() {
   backendBaseUrl = null;
 }
 
+function isSafeExternalUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function openExternalSafely(url) {
+  if (isSafeExternalUrl(url)) {
+    shell.openExternal(url);
+  }
+}
+
 function createWindow(baseUrl) {
   mainWindow = new BrowserWindow({
     width: 1320,
@@ -136,6 +151,9 @@ function createWindow(baseUrl) {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
       preload: path.join(__dirname, "preload.js"),
     },
   });
@@ -144,14 +162,14 @@ function createWindow(baseUrl) {
   mainWindow.loadURL(baseUrl);
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    openExternalSafely(url);
     return { action: "deny" };
   });
 
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (!url.startsWith(baseUrl)) {
       event.preventDefault();
-      shell.openExternal(url);
+      openExternalSafely(url);
     }
   });
 }
