@@ -1,3 +1,5 @@
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, HTTPException
 
 from app.core.detector import SlopDetector
@@ -17,6 +19,16 @@ from app.models.schemas import (
 
 router = APIRouter(prefix="/api/v1", tags=["analysis"])
 detector = SlopDetector()
+
+
+def normalize_website_url(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise WebsiteFetchError("URL is required.")
+    parsed = urlparse(cleaned)
+    if parsed.scheme:
+        return cleaned
+    return f"https://{cleaned}"
 
 
 def to_response(
@@ -47,7 +59,7 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
 @router.post("/analyze-url", response_model=AnalyzeResponse)
 def analyze_url(request: AnalyzeUrlRequest) -> AnalyzeResponse:
     try:
-        fetched = fetch_website_text(str(request.url))
+        fetched = fetch_website_text(normalize_website_url(request.url))
     except WebsiteFetchError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
