@@ -1,7 +1,8 @@
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
@@ -15,6 +16,7 @@ app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
     description="GreyNOC slop detection API for explainable content quality signals.",
+    docs_url=None,
 )
 
 app.include_router(router)
@@ -24,6 +26,52 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.get("/", include_in_schema=False)
 def dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/docs", include_in_schema=False)
+def custom_docs() -> HTMLResponse:
+    swagger_response = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{settings.app_name} - Swagger UI",
+    )
+    html = swagger_response.body.decode("utf-8")
+    home_bar = """
+    <style>
+      .gn-docs-home {
+        position: sticky;
+        top: 0;
+        z-index: 10000;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 24px;
+        background: #07080a;
+        border-bottom: 1px solid #343a46;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .gn-docs-home a {
+        display: inline-flex;
+        align-items: center;
+        min-height: 34px;
+        padding: 0 12px;
+        border: 1px solid #4ba3ff;
+        color: #f3f5f7;
+        background: rgba(75, 163, 255, 0.12);
+        text-decoration: none;
+        font-weight: 800;
+      }
+      .gn-docs-home span {
+        color: #a7afbd;
+        font-size: 0.9rem;
+      }
+    </style>
+    <div class="gn-docs-home">
+      <a href="/">Back to Dashboard</a>
+      <span>API Docs</span>
+    </div>
+    """
+    html = html.replace("<body>", f"<body>{home_bar}", 1)
+    return HTMLResponse(html)
 
 
 @app.get("/health", tags=["system"])
