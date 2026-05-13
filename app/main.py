@@ -24,6 +24,42 @@ CONTENT_SECURITY_POLICY = "; ".join(
         "form-action 'self'",
     ]
 )
+DOCS_HOME_BAR = """
+<style>
+  .gn-docs-home {
+    position: sticky;
+    top: 0;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 24px;
+    background: #07080a;
+    border-bottom: 1px solid #343a46;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+      BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .gn-docs-home a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 34px;
+    padding: 0 12px;
+    border: 1px solid #4ba3ff;
+    color: #f3f5f7;
+    background: rgba(75, 163, 255, 0.12);
+    text-decoration: none;
+    font-weight: 800;
+  }
+  .gn-docs-home span {
+    color: #a7afbd;
+    font-size: 0.9rem;
+  }
+</style>
+<div class="gn-docs-home">
+  <a href="/">Back to Dashboard</a>
+  <span>API Docs</span>
+</div>
+"""
 
 app = FastAPI(
     title=settings.app_name,
@@ -64,42 +100,7 @@ def custom_docs() -> HTMLResponse:
         title=f"{settings.app_name} - Swagger UI",
     )
     html = swagger_response.body.decode("utf-8")
-    home_bar = """
-    <style>
-      .gn-docs-home {
-        position: sticky;
-        top: 0;
-        z-index: 10000;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px 24px;
-        background: #07080a;
-        border-bottom: 1px solid #343a46;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      .gn-docs-home a {
-        display: inline-flex;
-        align-items: center;
-        min-height: 34px;
-        padding: 0 12px;
-        border: 1px solid #4ba3ff;
-        color: #f3f5f7;
-        background: rgba(75, 163, 255, 0.12);
-        text-decoration: none;
-        font-weight: 800;
-      }
-      .gn-docs-home span {
-        color: #a7afbd;
-        font-size: 0.9rem;
-      }
-    </style>
-    <div class="gn-docs-home">
-      <a href="/">Back to Dashboard</a>
-      <span>API Docs</span>
-    </div>
-    """
-    html = html.replace("<body>", f"<body>{home_bar}", 1)
+    html = html.replace("<body>", f"<body>{DOCS_HOME_BAR}", 1)
     return HTMLResponse(html)
 
 
