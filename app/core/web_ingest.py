@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Final
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import urljoin, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from app.core.settings import get_settings
 
@@ -17,6 +17,9 @@ TEXT_CONTENT_TYPES: Final = {
     "text/plain",
     "application/xhtml+xml",
 }
+MAX_URL_LENGTH: Final = 2048
+MAX_REDIRECTS: Final = 5
+CONTROL_OR_SPACE_RE: Final = re.compile(r"[\x00-\x20\x7f]")
 
 
 class WebsiteFetchError(ValueError):
@@ -32,6 +35,21 @@ class FetchedWebsite:
     status_code: int
     content_type: str
     byte_count: int
+
+
+class SafeRedirectHandler(HTTPRedirectHandler):
+    def __init__(self, allow_private_urls: bool) -> None:
+        self.allow_private_urls = allow_private_urls
+        self.redirect_count = 0
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, N802
+        self.redirect_count += 1
+        if self.redirect_count > MAX_REDIRECTS:
+            raise WebsiteFetchError("Website redirected too many times.")
+
+        safe_url = urljoin(req.full_url, newurl)
+        _validate_public_url(safe_url, self.allow_private_urls)
+        return super().redirect_request(req, fp, code, msg, headers, safe_url)
 
 
 class ReadableHTMLParser(HTMLParser):
@@ -75,27 +93,40 @@ class ReadableHTMLParser(HTMLParser):
         return _clean_text(" ".join(self._chunks))
 
 
+def normalize_website_url(url: str) -> str:
+    cleaned = url.strip()
+    if not cleaned:
+        raise WebsiteFetchError("URL is required.")
+    if CONTROL_OR_SPACE_RE.search(cleaned):
+        raise WebsiteFetchError("URL cannot contain spaces or control characters.")
+    if len(cleaned) > MAX_URL_LENGTH:
+        raise WebsiteFetchError("URL is too long.")
+
+    parsed = urlparse(cleaned)
+    if not parsed.scheme:
+        cleaned = f"https://{cleaned}"
+    return cleaned
+
+
 def fetch_website_text(url: str) -> FetchedWebsite:
     settings = get_settings()
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise WebsiteFetchError("Only http and https URLs can be analyzed.")
-    if not parsed.hostname:
-        raise WebsiteFetchError("URL is missing a host.")
-    if not settings.allow_private_urls and _host_is_private(parsed.hostname):
-        raise WebsiteFetchError("Private, local, and reserved network URLs are not enabled.")
+    normalized_url = normalize_website_url(url)
+    _validate_public_url(normalized_url, settings.allow_private_urls)
 
     request = Request(
-        url,
+        normalized_url,
         headers={
             "Accept": "text/html,text/plain,application/xhtml+xml;q=0.9,*/*;q=0.5",
             "User-Agent": "GreyNOC-Slop-Detection/0.1",
         },
         method="GET",
     )
+    opener = build_opener(SafeRedirectHandler(settings.allow_private_urls))
 
     try:
-        with urlopen(request, timeout=settings.web_fetch_timeout_seconds) as response:
+        with opener.open(request, timeout=settings.web_fetch_timeout_seconds) as response:
+            final_url = response.geturl()
+            _validate_public_url(final_url, settings.allow_private_urls)
             content_type = response.headers.get_content_type()
             if content_type not in TEXT_CONTENT_TYPES:
                 raise WebsiteFetchError(f"Unsupported content type: {content_type}")
@@ -104,8 +135,9 @@ def fetch_website_text(url: str) -> FetchedWebsite:
             if len(raw) > settings.web_fetch_max_bytes:
                 raise WebsiteFetchError("Website response exceeded the configured analysis limit.")
             body = raw.decode(charset, errors="replace")
-            final_url = response.geturl()
             status_code = response.status
+    except WebsiteFetchError:
+        raise
     except HTTPError as error:
         raise WebsiteFetchError(f"Website returned HTTP {error.code}.") from error
     except URLError as error:
@@ -127,7 +159,7 @@ def fetch_website_text(url: str) -> FetchedWebsite:
         raise WebsiteFetchError("No readable text was found on the website.")
 
     return FetchedWebsite(
-        requested_url=url,
+        requested_url=normalized_url,
         final_url=final_url,
         title=title,
         text=text,
@@ -135,6 +167,23 @@ def fetch_website_text(url: str) -> FetchedWebsite:
         content_type=content_type,
         byte_count=len(raw),
     )
+
+
+def _validate_public_url(url: str, allow_private_urls: bool) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise WebsiteFetchError("Only http and https URLs can be analyzed.")
+    if not parsed.hostname:
+        raise WebsiteFetchError("URL is missing a host.")
+    if parsed.username or parsed.password:
+        raise WebsiteFetchError("URLs with embedded usernames or passwords are not supported.")
+    try:
+        if parsed.port is not None and not (1 <= parsed.port <= 65535):
+            raise WebsiteFetchError("URL contains an invalid port.")
+    except ValueError as error:
+        raise WebsiteFetchError("URL contains an invalid port.") from error
+    if not allow_private_urls and _host_is_private(parsed.hostname):
+        raise WebsiteFetchError("Private, local, and reserved network URLs are not enabled.")
 
 
 def _host_is_private(hostname: str) -> bool:
