@@ -1,4 +1,4 @@
-from pydantic import AnyHttpUrl, BaseModel, Field
+from pydantic import BaseModel, Field
 
 
 class AnalyzeRequest(BaseModel):
@@ -7,7 +7,11 @@ class AnalyzeRequest(BaseModel):
 
 
 class AnalyzeUrlRequest(BaseModel):
-    url: AnyHttpUrl = Field(..., description="Website URL to fetch and inspect")
+    url: str = Field(
+        ...,
+        min_length=1,
+        description="Website URL to fetch and inspect. Plain domains like greynoc.com are accepted.",
+    )
     source: str | None = Field(default=None, description="Optional source label, case ID, or analyst note")
 
 
