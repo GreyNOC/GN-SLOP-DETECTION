@@ -12,6 +12,18 @@ from app.core.settings import get_settings
 settings = get_settings()
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+CONTENT_SECURITY_POLICY = "; ".join(
+    [
+        "default-src 'self'",
+        "img-src 'self' data:",
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+        "connect-src 'self'",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+    ]
+)
 
 app = FastAPI(
     title=settings.app_name,
@@ -22,7 +34,7 @@ app = FastAPI(
 
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["127.0.0.1", "localhost", "127.0.0.1:*", "localhost:*"],
+    allowed_hosts=["127.0.0.1", "localhost", "testserver"],
 )
 
 app.include_router(router)
@@ -36,10 +48,7 @@ async def add_security_headers(request: Request, call_next) -> Response:
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-    response.headers.setdefault(
-        "Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
-    )
+    response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
     return response
 
 
