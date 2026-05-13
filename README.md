@@ -10,7 +10,8 @@ This repo is intentionally lightweight: it runs locally, exposes a FastAPI API, 
 - Rule-based scoring engine with explainable signals, dimension scores, and profile metrics
 - Website fetching with readable text extraction and private-network blocking by default
 - Square analyst dashboard for text and website review
-- CLI scanner for text files and folders
+- Electron desktop shell that launches the local analysis engine
+- Working CLI for text, files, folders, and website URLs
 - JSON output designed for SOC/analyst workflows
 - Docker support
 - Pytest test suite
@@ -52,17 +53,65 @@ Website fetching accepts `http` and `https`, limits response size, extracts read
 
 ## CLI usage
 
+Analyze inline text:
+
+```bash
+python -m app.cli text "This revolutionary solution is guaranteed." --pretty
+```
+
 Analyze one file:
 
 ```bash
-python scripts/gn_slop_scan.py examples/sample.txt
+python -m app.cli file examples/sample.txt --pretty
 ```
 
 Analyze a folder:
 
 ```bash
-python scripts/gn_slop_scan.py ./docs --recursive
+python -m app.cli file ./docs --recursive
 ```
+
+Analyze a website:
+
+```bash
+python -m app.cli url https://example.com --pretty
+```
+
+The legacy scanner still works:
+
+```bash
+python scripts/gn_slop_scan.py examples/sample.txt
+```
+
+After installing the package, the console script is available as:
+
+```bash
+gn-slop text "This article will explore a powerful next-generation solution."
+```
+
+## Desktop app
+
+Install Electron dependencies and start the desktop shell in development:
+
+```bash
+npm install
+npm start
+```
+
+The Electron app starts a local FastAPI backend on an open loopback port, waits for `/health`, then loads the same analyst dashboard.
+
+## Compile desktop builds
+
+Run the compiler script for the OS you are building on:
+
+```text
+powershell -ExecutionPolicy Bypass -File scripts/compile-windows.ps1
+scripts\compile-windows.bat
+bash scripts/compile-mac.sh
+bash scripts/compile-linux.sh
+```
+
+Each script installs Python build dependencies, creates a `gn-slop-backend` executable with PyInstaller, installs Electron dependencies, and writes packaged apps to `release/`.
 
 ## Score meaning
 
@@ -87,6 +136,7 @@ app/
   api/            API routes
   core/           detection engine and settings
   models/         request/response schemas
+electron/         Electron desktop app shell
 scripts/          CLI utilities
 tests/            unit/API tests
 docs/             implementation notes
@@ -98,6 +148,7 @@ docs/             implementation notes
 pip install -r requirements-dev.txt
 pytest
 ruff check .
+npm start
 ```
 
 ## Docker

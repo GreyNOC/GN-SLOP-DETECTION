@@ -10,8 +10,9 @@ Provide a small, explainable service that helps GreyNOC analysts identify suspic
 2. Website ingest: fetches public HTTP(S) pages, limits response size, extracts readable text, and blocks private-network targets by default.
 3. Rule engine: calculates explainable signals, dimension scores, profile metrics, and a normalized score.
 4. Static dashboard: provides a square analyst console for text, URL, signal, dimension, and source review.
-5. CLI scanner: supports local file and directory scanning.
-6. Tests and CI: protect the detector and API contracts.
+5. Electron shell: starts the local backend on a loopback port and loads the dashboard as a desktop app.
+6. CLI: supports inline text, files, directories, and website URLs with the same engine as the API.
+7. Tests and CI: protect the detector, CLI, and API contracts.
 
 ## Detection philosophy
 
@@ -29,4 +30,5 @@ The current algorithm builds a complete slop picture from:
 - Add source reputation lookups for fetched domains.
 - Store analysis events in Postgres or SQLite.
 - Add analyst feedback to improve signal weighting.
+- Add signed desktop release publishing for Windows, macOS, and Linux.
 - Integrate with GreyNOC ticket, SOC, or report pipelines.

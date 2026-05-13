@@ -1,0 +1,66 @@
+{
+  "name": "gn-slop-detection-desktop",
+  "version": "0.1.0",
+  "description": "GreyNOC Slop Detection desktop app",
+  "main": "electron/main.js",
+  "private": true,
+  "author": "GreyNOC",
+  "license": "MIT",
+  "scripts": {
+    "start": "node scripts/run-electron.js",
+    "dev": "node scripts/run-electron.js",
+    "cli": "node scripts/run-cli.js",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win nsis portable",
+    "build:mac": "electron-builder --mac dmg zip",
+    "build:linux": "electron-builder --linux AppImage deb tar.gz",
+    "compile:win": "powershell -ExecutionPolicy Bypass -File scripts/compile-windows.ps1",
+    "compile:mac": "bash scripts/compile-mac.sh",
+    "compile:linux": "bash scripts/compile-linux.sh"
+  },
+  "devDependencies": {
+    "electron": "latest",
+    "electron-builder": "latest"
+  },
+  "build": {
+    "appId": "com.greynoc.slopdetection",
+    "productName": "GreyNOC Slop Detection",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/desktop-backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "tar.gz"
+      ],
+      "category": "Utility"
+    }
+  }
+}
