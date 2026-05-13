@@ -10,6 +10,34 @@ from typing import Any
 from app.core.detector import DetectionResult, SlopDetector
 from app.core.web_ingest import FetchedWebsite, WebsiteFetchError, fetch_website_text
 
+SPLASH = r"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                         G R E Y N O C   S L O P                              ║
+║                            D E T E C T I O N                                  ║
+║                                                                              ║
+║                              .     o     .                                    ║
+║                         .      \   |   /      .                               ║
+║                      o----------\--+--/----------o                            ║
+║                       \          \ | /          /                             ║
+║                        \     o----\|/----o     /                              ║
+║                         \   / \   o   / \   /                                 ║
+║                          o-/---\--+--/---\-o                                  ║
+║                         /   \   \ | /   /   \                                 ║
+║                        /     o----+----o     \                                ║
+║                       /          / | \          \                              ║
+║                      o----------/--+--\----------o                            ║
+║                         '      /   |   \      '                               ║
+║                              '     o     '                                    ║
+║                                                                              ║
+║                    Metatron signal map for analyst review                     ║
+║              Explainable slop scoring for text, files, and websites           ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+""".strip("\n")
+
+TAGLINE = "GreyNOC Slop Detection | Signal clarity for human analysts"
+
 
 def iter_text_files(path: Path, recursive: bool) -> list[Path]:
     if path.is_file():
@@ -51,6 +79,22 @@ def print_json(payload: dict[str, Any], pretty: bool) -> None:
     print(json.dumps(payload, indent=2 if pretty else None))
 
 
+def print_splash() -> None:
+    print(SPLASH)
+    print()
+    print(TAGLINE)
+    print()
+    print("Quick commands:")
+    print('  gn-slop text "This revolutionary system is guaranteed." --pretty')
+    print("  gn-slop file examples/sample.txt --pretty")
+    print("  gn-slop url greynoc.com --pretty")
+
+
+def show_splash(args: argparse.Namespace) -> int:
+    print_splash()
+    return 0
+
+
 def analyze_text(args: argparse.Namespace) -> int:
     result = SlopDetector().analyze(args.text)
     print_json(result_payload(result, args.source, "text"), args.pretty)
@@ -88,8 +132,15 @@ def analyze_url(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="gn-slop", description="GreyNOC slop analysis CLI.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="gn-slop",
+        description="GreyNOC slop analysis CLI.",
+        epilog="Run 'gn-slop splash' for the GreyNOC Metatron signal banner.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    splash_parser = subparsers.add_parser("splash", help="Show the GreyNOC branded CLI splash screen.")
+    splash_parser.set_defaults(handler=show_splash)
 
     text_parser = subparsers.add_parser("text", help="Analyze inline text.")
     text_parser.add_argument("text", help="Text to analyze.")
@@ -104,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     file_parser.set_defaults(handler=analyze_files)
 
     url_parser = subparsers.add_parser("url", help="Fetch and analyze a website.")
-    url_parser.add_argument("url", help="HTTP or HTTPS URL to analyze.")
+    url_parser.add_argument("url", help="Website URL or plain domain to analyze.")
     url_parser.add_argument("--source", help="Optional source label.")
     url_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     url_parser.set_defaults(handler=analyze_url)
@@ -115,6 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not hasattr(args, "handler"):
+        print_splash()
+        print()
+        parser.print_help()
+        return 0
     return args.handler(args)
 
 
