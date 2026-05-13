@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node scripts/run-electron.js",
     "dev": "node scripts/run-electron.js",
+    "gn": "node scripts/run-cli.js",
     "cli": "node scripts/run-cli.js",
     "build": "electron-builder",
     "build:win": "electron-builder --win nsis portable",
