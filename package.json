@@ -12,11 +12,16 @@
     "cli": "node scripts/run-cli.js",
     "build": "electron-builder",
     "build:win": "electron-builder --win nsis portable",
+    "build:win:inno": "powershell -ExecutionPolicy Bypass -File scripts/build-inno-windows.ps1",
     "build:mac": "electron-builder --mac dmg zip",
     "build:linux": "electron-builder --linux AppImage deb tar.gz",
     "compile:win": "powershell -ExecutionPolicy Bypass -File scripts/compile-windows.ps1",
     "compile:mac": "bash scripts/compile-mac.sh",
-    "compile:linux": "bash scripts/compile-linux.sh"
+    "compile:linux": "bash scripts/compile-linux.sh",
+    "release:win": "powershell -ExecutionPolicy Bypass -File scripts/compile-windows.ps1",
+    "release:win:inno": "powershell -ExecutionPolicy Bypass -File scripts/build-inno-windows.ps1",
+    "release:mac": "bash scripts/compile-mac.sh",
+    "release:linux": "bash scripts/compile-linux.sh"
   },
   "devDependencies": {
     "electron": "latest",
@@ -45,14 +50,28 @@
       "target": [
         "nsis",
         "portable"
-      ]
+      ],
+      "publisherName": "GreyNOC"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "GreyNOC Slop Detection"
     },
     "mac": {
       "target": [
         "dmg",
         "zip"
       ],
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "sign": false
     },
     "linux": {
       "target": [
