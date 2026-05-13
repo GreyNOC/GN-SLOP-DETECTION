@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.core.web_ingest import normalize_website_url
 from app.main import app
 from app.models.schemas import MAX_TEXT_LENGTH
 
@@ -35,5 +36,15 @@ def test_analyze_url_blocks_private_network_by_default():
 
 def test_analyze_url_restricts_nonstandard_ports():
     response = client.post("/api/v1/analyze-url", json={"url": "https://example.com:4443/"})
+    assert response.status_code == 400
+    assert "ports 80 and 443" in response.json()["detail"]
+
+
+def test_normalize_website_url_accepts_plain_domain_with_standard_port():
+    assert normalize_website_url("example.com:443/path") == "https://example.com:443/path"
+
+
+def test_analyze_url_restricts_plain_domain_with_nonstandard_port():
+    response = client.post("/api/v1/analyze-url", json={"url": "example.com:4443/"})
     assert response.status_code == 400
     assert "ports 80 and 443" in response.json()["detail"]
