@@ -24,8 +24,8 @@
     "release:linux": "bash scripts/compile-linux.sh"
   },
   "devDependencies": {
-    "electron": "latest",
-    "electron-builder": "latest"
+    "electron": "39.2.6",
+    "electron-builder": "26.0.12"
   },
   "build": {
     "appId": "com.greynoc.slopdetection",
