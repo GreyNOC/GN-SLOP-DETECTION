@@ -37,7 +37,7 @@ echo Installing Python dependencies...
 if errorlevel 1 goto fail
 
 echo Installing Electron dependencies...
-npm install
+call npm install
 if errorlevel 1 goto fail
 
 set "GN_SLOP_PYTHON=%CD%\%VENV_PYTHON%"
@@ -48,7 +48,7 @@ echo The Electron front end will open and launch the local analysis engine autom
 echo Leave this window open while using the app.
 echo.
 
-npm start
+call npm start
 if errorlevel 1 goto fail
 
 goto done
