@@ -1,18 +1,39 @@
+from typing import Final
+
 from pydantic import BaseModel, Field
+
+MAX_TEXT_LENGTH: Final = 200_000
+MAX_SOURCE_LENGTH: Final = 256
+MAX_URL_LENGTH: Final = 2_048
+MAX_BATCH_ITEMS: Final = 25
 
 
 class AnalyzeRequest(BaseModel):
-    text: str = Field(..., min_length=1, description="Content to inspect for slop indicators")
-    source: str | None = Field(default=None, description="Optional source label, file name, or ticket ID")
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_TEXT_LENGTH,
+        description="Content to inspect for slop indicators",
+    )
+    source: str | None = Field(
+        default=None,
+        max_length=MAX_SOURCE_LENGTH,
+        description="Optional source label, file name, or ticket ID",
+    )
 
 
 class AnalyzeUrlRequest(BaseModel):
     url: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_URL_LENGTH,
         description="Website URL to fetch and inspect. Plain domains like greynoc.com are accepted.",
     )
-    source: str | None = Field(default=None, description="Optional source label, case ID, or analyst note")
+    source: str | None = Field(
+        default=None,
+        max_length=MAX_SOURCE_LENGTH,
+        description="Optional source label, case ID, or analyst note",
+    )
 
 
 class Signal(BaseModel):
@@ -65,7 +86,7 @@ class AnalyzeResponse(BaseModel):
 
 
 class BatchAnalyzeRequest(BaseModel):
-    items: list[AnalyzeRequest] = Field(..., min_length=1, max_length=100)
+    items: list[AnalyzeRequest] = Field(..., min_length=1, max_length=MAX_BATCH_ITEMS)
 
 
 class BatchAnalyzeResponse(BaseModel):
