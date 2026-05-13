@@ -19,6 +19,7 @@ TEXT_CONTENT_TYPES: Final = {
 }
 MAX_URL_LENGTH: Final = 2048
 MAX_REDIRECTS: Final = 5
+ALLOWED_PORTS: Final = {80, 443}
 CONTROL_OR_SPACE_RE: Final = re.compile(r"[\x00-\x20\x7f]")
 
 
@@ -178,10 +179,11 @@ def _validate_public_url(url: str, allow_private_urls: bool) -> None:
     if parsed.username or parsed.password:
         raise WebsiteFetchError("URLs with embedded usernames or passwords are not supported.")
     try:
-        if parsed.port is not None and not (1 <= parsed.port <= 65535):
-            raise WebsiteFetchError("URL contains an invalid port.")
+        port = parsed.port
     except ValueError as error:
         raise WebsiteFetchError("URL contains an invalid port.") from error
+    if port is not None and port not in ALLOWED_PORTS:
+        raise WebsiteFetchError("Only standard website ports 80 and 443 are supported.")
     if not allow_private_urls and _host_is_private(parsed.hostname):
         raise WebsiteFetchError("Private, local, and reserved network URLs are not enabled.")
 
