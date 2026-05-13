@@ -11,29 +11,37 @@ from app.core.detector import DetectionResult, SlopDetector
 from app.core.web_ingest import FetchedWebsite, WebsiteFetchError, fetch_website_text
 
 SPLASH = r"""
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                                                                              ║
-║                         G R E Y N O C   S L O P                              ║
-║                            D E T E C T I O N                                  ║
-║                                                                              ║
-║                              .     o     .                                    ║
-║                         .      \   |   /      .                               ║
-║                      o----------\--+--/----------o                            ║
-║                       \          \ | /          /                             ║
-║                        \     o----\|/----o     /                              ║
-║                         \   / \   o   / \   /                                 ║
-║                          o-/---\--+--/---\-o                                  ║
-║                         /   \   \ | /   /   \                                 ║
-║                        /     o----+----o     \                                ║
-║                       /          / | \          \                              ║
-║                      o----------/--+--\----------o                            ║
-║                         '      /   |   \      '                               ║
-║                              '     o     '                                    ║
-║                                                                              ║
-║                    Metatron signal map for analyst review                     ║
-║              Explainable slop scoring for text, files, and websites           ║
-║                                                                              ║
-╚══════════════════════════════════════════════════════════════════════════════╝
++------------------------------------------------------------------------------+
+|                                                                              |
+|                         G R E Y N O C   S L O P                              |
+|                            D E T E C T I O N                                  |
+|                                                                              |
+|                                METATRON GRID                                  |
+|                                                                              |
+|                                  (  O  )                                      |
+|                              .----/ | \----.                                  |
+|                           .-'     / | \     '-.                               |
+|                      (  O  )----(  O  )----(  O  )                            |
+|                       / | \       / | \       / | \                            |
+|                      /  |  \     /  |  \     /  |  \                           |
+|                (  O  )--+---(  O  )---+--(  O  )                              |
+|                   \      \   /   |   \   /      /                              |
+|                    \      \ /    |    \ /      /                               |
+|                     (  O  )----(  O  )----(  O  )                              |
+|                    /      / \    |    / \      \                               |
+|                   /      /   \   |   /   \      \                              |
+|                (  O  )--+---(  O  )---+--(  O  )                              |
+|                      \  |  /     \  |  /     \  |  /                           |
+|                       \ | /       \ | /       \ | /                            |
+|                      (  O  )----(  O  )----(  O  )                            |
+|                           '-.     \ | /     .-'                               |
+|                              '----\ | /----'                                  |
+|                                  (  O  )                                      |
+|                                                                              |
+|                    GreyNOC analyst signal geometry                            |
+|             Explainable slop scoring for text, files, and websites            |
+|                                                                              |
++------------------------------------------------------------------------------+
 """.strip("\n")
 
 TAGLINE = "GreyNOC Slop Detection | Signal clarity for human analysts"
