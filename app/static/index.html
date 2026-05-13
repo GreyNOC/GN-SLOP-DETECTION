@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GreyNOC Slop Detection</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">GN</div>
+          <div>
+            <div class="brand-name">GreyNOC</div>
+            <div class="brand-product">Slop Detection</div>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="Sections">
+          <a class="nav-item active" href="#analysis">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M4 5h16M4 12h10M4 19h7" />
+            </svg>
+            Analysis
+          </a>
+          <a class="nav-item" href="/docs">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M8 6h8M8 10h8M8 14h5M6 3h9l3 3v15H6z" />
+            </svg>
+            API Docs
+          </a>
+          <a class="nav-item" href="/health">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M20 7 9 18l-5-5" />
+            </svg>
+            Health
+          </a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>Local service online</span>
+        </div>
+      </aside>
+
+      <main class="workspace" id="analysis">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Content Quality Console</p>
+            <h1>Analyst Review</h1>
+          </div>
+          <div class="topbar-actions">
+            <button class="icon-button" id="sampleButton" type="button" aria-label="Load sample" title="Load sample">
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6M8 13h8M8 17h5" />
+              </svg>
+            </button>
+            <button class="icon-button" id="clearButton" type="button" aria-label="Clear" title="Clear">
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M3 6h18M8 6V4h8v2M10 11v6M14 11v6M6 6l1 15h10l1-15" />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <section class="metrics-grid" aria-label="Current metrics">
+          <article class="metric-card">
+            <span>Risk</span>
+            <strong id="riskMetric">Ready</strong>
+          </article>
+          <article class="metric-card">
+            <span>Score</span>
+            <strong id="scoreMetric">0.000</strong>
+          </article>
+          <article class="metric-card">
+            <span>Words</span>
+            <strong id="wordMetric">0</strong>
+          </article>
+          <article class="metric-card">
+            <span>Signals</span>
+            <strong id="signalMetric">0</strong>
+          </article>
+        </section>
+
+        <section class="analysis-grid">
+          <form class="panel input-panel" id="analysisForm">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Input</p>
+                <h2>Inspection Target</h2>
+              </div>
+              <span class="counter" id="charCounter">0 chars</span>
+            </div>
+
+            <div class="mode-switch" role="tablist" aria-label="Input mode">
+              <button class="mode-button active" id="textModeButton" type="button" role="tab" aria-selected="true">
+                Text
+              </button>
+              <button class="mode-button" id="urlModeButton" type="button" role="tab" aria-selected="false">
+                Website
+              </button>
+            </div>
+
+            <label class="field-label" for="sourceInput">Source</label>
+            <input
+              class="source-input"
+              id="sourceInput"
+              name="source"
+              type="text"
+              autocomplete="off"
+              placeholder="Ticket, report, post, or case label"
+            />
+
+            <div id="urlField" hidden>
+              <label class="field-label" for="urlInput">URL</label>
+              <input
+                class="source-input"
+                id="urlInput"
+                name="url"
+                type="url"
+                autocomplete="url"
+                placeholder="https://example.com/article"
+              />
+            </div>
+
+            <div id="textField">
+              <label class="field-label" for="textInput">Content</label>
+              <textarea
+                id="textInput"
+                name="text"
+                spellcheck="true"
+                placeholder="Paste content for review"
+                required
+              ></textarea>
+            </div>
+
+            <div class="form-actions">
+              <button class="primary-button" id="analyzeButton" type="submit">
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M21 21l-4.3-4.3M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16z" />
+                </svg>
+                Analyze
+              </button>
+              <span class="request-state" id="requestState" role="status" aria-live="polite">Idle</span>
+            </div>
+          </form>
+
+          <section class="panel score-panel" aria-label="Analysis result">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Result</p>
+                <h2>Slop Picture</h2>
+              </div>
+              <span class="risk-pill neutral" id="riskPill">Ready</span>
+            </div>
+
+            <div class="score-block" id="scoreBlock">
+              <span id="dialScore">0%</span>
+              <small>Composite score</small>
+              <div class="score-track" aria-hidden="true">
+                <div class="score-fill" id="scoreFill"></div>
+              </div>
+            </div>
+
+            <div class="source-card" id="sourceCard" hidden>
+              <span id="sourceKind">Source</span>
+              <strong id="sourceTitle"></strong>
+              <a id="sourceUrl" href="#" target="_blank" rel="noreferrer"></a>
+            </div>
+
+            <div class="recommendation" id="recommendation">
+              Run an analysis to populate the review profile.
+            </div>
+
+            <div class="threshold-row">
+              <span>Alert threshold</span>
+              <strong id="thresholdValue">Loading</strong>
+            </div>
+          </section>
+        </section>
+
+        <section class="picture-grid" aria-label="Complete slop picture">
+          <section class="panel dimensions-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Algorithm</p>
+                <h2>Dimension Scores</h2>
+              </div>
+            </div>
+            <div class="dimension-grid" id="dimensionGrid"></div>
+          </section>
+
+          <section class="panel profile-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Profile</p>
+                <h2>Evidence Shape</h2>
+              </div>
+            </div>
+            <div class="profile-grid" id="profileGrid"></div>
+          </section>
+        </section>
+
+        <section class="panel signals-panel" aria-label="Signals">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Evidence</p>
+              <h2>Detected Signals</h2>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Signal</th>
+                  <th>Category</th>
+                  <th>Weight</th>
+                  <th>Count</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody id="signalsTable">
+                <tr>
+                  <td colspan="5" class="empty-cell">No signals recorded.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
