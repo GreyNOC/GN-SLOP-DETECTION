@@ -43,6 +43,8 @@ def main() -> int:
                 "risk": result.risk,
                 "word_count": result.word_count,
                 "signals": [signal.__dict__ for signal in result.signals],
+                "dimensions": [dimension.__dict__ for dimension in result.dimensions],
+                "profile": result.profile.__dict__,
                 "recommendation": result.recommendation,
             }
         )

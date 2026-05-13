@@ -17,3 +17,11 @@ def test_analyze_endpoint():
     payload = response.json()
     assert "score" in payload
     assert "signals" in payload
+    assert "dimensions" in payload
+    assert "profile" in payload
+
+
+def test_analyze_url_blocks_private_network_by_default():
+    response = client.post("/api/v1/analyze-url", json={"url": "http://127.0.0.1/"})
+    assert response.status_code == 400
+    assert "Private" in response.json()["detail"]

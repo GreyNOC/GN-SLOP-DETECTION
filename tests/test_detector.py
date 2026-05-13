@@ -13,3 +13,15 @@ def test_detector_flags_sloppy_content():
     result = SlopDetector().analyze(text)
     assert result.risk in {"moderate", "high"}
     assert result.signals
+
+
+def test_detector_returns_complete_slop_picture():
+    text = (
+        "Experts agree this unmatched platform will improve every workflow. "
+        "It is important to note that the solution is revolutionary and dynamic."
+    )
+    result = SlopDetector().analyze(text)
+    assert result.profile.algorithm == "rule-picture-v2"
+    assert result.dimensions
+    assert {dimension.name for dimension in result.dimensions} >= {"Clarity", "Evidence", "Specificity"}
+    assert all(0.0 <= dimension.score <= 1.0 for dimension in result.dimensions)

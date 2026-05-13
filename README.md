@@ -6,8 +6,10 @@ This repo is intentionally lightweight: it runs locally, exposes a FastAPI API, 
 
 ## Features
 
-- FastAPI REST API for single and batch text analysis
-- Rule-based scoring engine with explainable signals
+- FastAPI REST API for single, batch, and website URL analysis
+- Rule-based scoring engine with explainable signals, dimension scores, and profile metrics
+- Website fetching with readable text extraction and private-network blocking by default
+- Square analyst dashboard for text and website review
 - CLI scanner for text files and folders
 - JSON output designed for SOC/analyst workflows
 - Docker support
@@ -26,6 +28,7 @@ uvicorn app.main:app --reload
 
 Open:
 
+- Dashboard: http://127.0.0.1:8000/
 - API health: http://127.0.0.1:8000/health
 - API docs: http://127.0.0.1:8000/docs
 
@@ -36,6 +39,16 @@ curl -X POST http://127.0.0.1:8000/api/v1/analyze \
   -H 'Content-Type: application/json' \
   -d '{"text":"This revolutionary solution leverages next-generation synergy to unlock unprecedented outcomes with no evidence provided."}'
 ```
+
+Analyze a website:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/analyze-url \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/article"}'
+```
+
+Website fetching accepts `http` and `https`, limits response size, extracts readable HTML/text, and blocks local, private, and reserved network addresses unless `ALLOW_PRIVATE_URLS=true` is set.
 
 ## CLI usage
 
@@ -60,6 +73,12 @@ Scores range from `0.0` to `1.0`.
 - `0.60 - 1.00`: high slop risk
 
 This app does not claim to prove whether content is AI-generated. It highlights quality and trust signals for human review.
+
+Responses include a complete slop picture:
+
+- `signals`: explainable findings with category, weight, count, and description
+- `dimensions`: clarity, evidence, specificity, originality, manipulation, structure, and authenticity scores
+- `profile`: sentence, specificity, evidence, repetition, link, number, and citation metrics
 
 ## Project layout
 
