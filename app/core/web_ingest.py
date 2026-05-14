@@ -100,6 +100,8 @@ def normalize_website_url(url: str) -> str:
         raise WebsiteFetchError("URL is required.")
     if CONTROL_OR_SPACE_RE.search(cleaned):
         raise WebsiteFetchError("URL cannot contain spaces or control characters.")
+    if "\\" in cleaned:
+        raise WebsiteFetchError("URL cannot contain backslashes.")
     if len(cleaned) > MAX_URL_LENGTH:
         raise WebsiteFetchError("URL is too long.")
 
@@ -173,10 +175,14 @@ def _validate_public_url(url: str, allow_private_urls: bool) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise WebsiteFetchError("Only http and https URLs can be analyzed.")
-    if not parsed.hostname:
+    if not parsed.netloc or not parsed.hostname:
         raise WebsiteFetchError("URL is missing a host.")
+    if "\\" in parsed.netloc:
+        raise WebsiteFetchError("URL host cannot contain backslashes.")
     if parsed.username or parsed.password:
         raise WebsiteFetchError("URLs with embedded usernames or passwords are not supported.")
+    if parsed.netloc.endswith(":"):
+        raise WebsiteFetchError("URL contains an invalid port.")
     try:
         port = parsed.port
     except ValueError as error:
