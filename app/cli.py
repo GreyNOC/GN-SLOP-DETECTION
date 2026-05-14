@@ -200,7 +200,11 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser = subparsers.add_parser("review", help="Review a website, file, or folder.")
     review_parser.add_argument("target", help="Website/domain, file path, or folder path to review.")
     review_parser.add_argument("--source", help="Optional source label for website reviews.")
-    review_parser.add_argument("--recursive", action="store_true", help="Scan .txt files recursively for folder reviews.")
+    review_parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Scan .txt files recursively for folder reviews.",
+    )
     review_parser.add_argument("--json", action="store_true", help="Output machine-readable JSON.")
     review_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output when using --json.")
     review_parser.set_defaults(handler=review_target)

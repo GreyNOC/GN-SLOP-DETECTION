@@ -48,3 +48,15 @@ def test_analyze_url_restricts_plain_domain_with_nonstandard_port():
     response = client.post("/api/v1/analyze-url", json={"url": "example.com:4443/"})
     assert response.status_code == 400
     assert "ports 80 and 443" in response.json()["detail"]
+
+
+def test_analyze_url_rejects_empty_port():
+    response = client.post("/api/v1/analyze-url", json={"url": "https://example.com:/"})
+    assert response.status_code == 400
+    assert "invalid port" in response.json()["detail"]
+
+
+def test_analyze_url_rejects_backslash_in_host():
+    response = client.post("/api/v1/analyze-url", json={"url": r"https://example.com\@127.0.0.1/"})
+    assert response.status_code == 400
+    assert "backslashes" in response.json()["detail"]
