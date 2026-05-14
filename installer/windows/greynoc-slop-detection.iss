@@ -4,6 +4,7 @@
 #define MyAppURL "https://greynoc.com"
 #define MyAppExeName "GreyNOC Slop Detection.exe"
 #define MySourceDir "..\..\release\win-unpacked"
+#define MyIconFile "..\..\build\icon.ico"
 
 [Setup]
 AppId={{F2E62D58-47A1-4B3B-9D3B-31D4A5C53E10}
@@ -25,7 +26,6 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
-SetupIconFile=..\..\build\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
@@ -34,6 +34,9 @@ VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
 CloseApplications=yes
 RestartApplications=no
+#if FileExists(MyIconFile)
+SetupIconFile={#MyIconFile}
+#endif
 #if GetEnv("GN_SIGNTOOL") != ""
 SignTool=custom
 SignedUninstaller=yes
