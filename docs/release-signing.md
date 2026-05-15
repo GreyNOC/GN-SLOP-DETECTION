@@ -44,6 +44,8 @@ release/inno
 
 ### Windows signing
 
+Local Windows builds are unsigned by default unless signing credentials are supplied in the environment. This keeps installer packaging reproducible on developer machines without requiring certificate-store access, and the release script skips Electron Builder's executable signing/editing step for unsigned builds.
+
 To reduce Windows SmartScreen and antivirus warnings, use a real Authenticode code signing certificate.
 
 Best results come from an Extended Validation code signing certificate, because it usually builds SmartScreen reputation faster than standard OV certificates. A certificate does not guarantee zero warnings on day one; reputation still matters.

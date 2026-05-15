@@ -64,35 +64,8 @@ powershell -ExecutionPolicy Bypass -File scripts\compile-windows.ps1
 if errorlevel 1 goto fail
 
 echo.
-echo Copying release artifacts into clean GitHub release folder...
-for %%F in (release\*.exe release\*.msi release\*.zip release\*.7z release\*.blockmap release\*.yml release\*.yaml release\*.json) do (
-    if exist "%%~F" copy /y "%%~F" "%RELEASE_DIR%\" >nul
-)
-
-if exist "release\win-unpacked" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path 'release\win-unpacked\*' -DestinationPath '%RELEASE_DIR%\%APP_NAME%-v%VERSION%-win-unpacked.zip' -Force"
-    if errorlevel 1 goto fail
-)
-
-echo Writing release notes...
-(
-    echo # GreyNOC Slop Detection v%VERSION%
-    echo.
-    echo Windows desktop release artifacts for GitHub Releases.
-    echo.
-    echo ## Install
-    echo.
-    echo - Use the installer `.exe` if present.
-    echo - Use the portable `.exe` if present.
-    echo - Use `%APP_NAME%-v%VERSION%-win-unpacked.zip` for a raw unpacked app archive.
-    echo.
-    echo ## Verify
-    echo.
-    echo Compare downloaded files against `SHA256SUMS.txt`.
-) > "%RELEASE_DIR%\RELEASE-NOTES.md"
-
-echo Generating SHA256 checksums...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -File '%RELEASE_DIR%' | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object { '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower(), $_.Name } | Set-Content -Encoding ascii '%RELEASE_DIR%\SHA256SUMS.txt'"
+echo Packaging GitHub release folder...
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-github-release.ps1 -Version "%VERSION%" -ReleaseRoot "%RELEASE_ROOT%"
 if errorlevel 1 goto fail
 
 echo.

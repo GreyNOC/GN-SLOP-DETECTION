@@ -20,6 +20,21 @@ $env:electron_config_cache = Join-Path $RepoRoot ".electron-cache"
 $env:ELECTRON_CACHE = Join-Path $RepoRoot ".electron-cache"
 $env:ELECTRON_BUILDER_CACHE = Join-Path $RepoRoot ".electron-builder-cache"
 
+if (
+    -not $env:CSC_LINK -and
+    -not $env:WIN_CSC_LINK -and
+    -not $env:CSC_NAME -and
+    -not $env:WIN_CSC_NAME -and
+    -not $env:AZURE_TENANT_ID
+) {
+    $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+}
+
+$BuildArgs = @("run", "build:win")
+if ($env:CSC_IDENTITY_AUTO_DISCOVERY -eq "false") {
+    $BuildArgs += @("--", "-c.win.signAndEditExecutable=false")
+}
+
 if ($env:PYTHON) {
     $Python = $env:PYTHON
 } elseif (Test-Path ".venv\Scripts\python.exe") {
@@ -56,6 +71,6 @@ Write-Host "Installing Electron dependencies..."
 Invoke-Checked "npm" @("install")
 
 Write-Host "Packaging Windows app..."
-Invoke-Checked "npm" @("run", "build:win")
+Invoke-Checked "npm" $BuildArgs
 
 Write-Host "Done. Output is in the release directory."

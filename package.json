@@ -51,16 +51,19 @@
       "target": [
         "nsis",
         "portable"
-      ],
-      "publisherName": "GreyNOC"
+      ]
     },
     "nsis": {
+      "artifactName": "GreyNOC-Slop-Detection-Setup-${version}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "GreyNOC Slop Detection"
+    },
+    "portable": {
+      "artifactName": "GreyNOC-Slop-Detection-Portable-${version}.${ext}"
     },
     "mac": {
       "target": [

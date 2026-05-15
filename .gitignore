@@ -10,6 +10,7 @@ build/
 *.egg-info/
 node_modules/
 release/
+github-release/
 .electron-cache/
 .electron-builder-cache/
 *.spec

@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt -r requirements-build.txt
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest
+
+      - name: Build Windows release
+        run: npm run release:win
+
+      - name: Package GitHub release assets
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          ./scripts/package-github-release.ps1 -Version $version
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $releaseDir = "github-release/GreyNOC-Slop-Detection-v$version-windows"
+          $notesFile = Join-Path $releaseDir "RELEASE-NOTES.md"
+          $files = Get-ChildItem -File $releaseDir | ForEach-Object { $_.FullName }
+
+          gh release create $tag $files `
+            --title "GreyNOC Slop Detection $tag" `
+            --notes-file $notesFile
