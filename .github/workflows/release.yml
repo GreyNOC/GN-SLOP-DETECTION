@@ -36,7 +36,7 @@ jobs:
         run: pytest
 
       - name: Build Windows release
-        run: npm run release:win
+        run: npm run release:win -- -PublishMode never
 
       - name: Package GitHub release assets
         shell: pwsh

@@ -1,3 +1,8 @@
+param(
+    [ValidateSet("never", "onTag", "onTagOrDraft", "always")]
+    [string]$PublishMode = "never"
+)
+
 $ErrorActionPreference = "Stop"
 
 function Invoke-Checked {
@@ -30,10 +35,13 @@ if (
     $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
 }
 
-$BuildArgs = @("run", "build:win")
+$ElectronBuilderArgs = @("--publish", $PublishMode)
+
 if ($env:CSC_IDENTITY_AUTO_DISCOVERY -eq "false") {
-    $BuildArgs += @("--", "-c.win.signAndEditExecutable=false")
+    $ElectronBuilderArgs += "-c.win.signAndEditExecutable=false"
 }
+
+$BuildArgs = @("run", "build:win", "--") + $ElectronBuilderArgs
 
 if ($env:PYTHON) {
     $Python = $env:PYTHON
@@ -47,12 +55,19 @@ Write-Host "Installing Python build dependencies..."
 Invoke-Checked $Python @("-m", "pip", "install", "-r", "requirements.txt", "-r", "requirements-build.txt")
 
 Write-Host "Building Python backend executable..."
+$BackendBuildFile = Join-Path $RepoRoot "dist\gn-slop-backend.exe"
+$BackendBuildDir = Join-Path $RepoRoot "dist\gn-slop-backend"
+if (Test-Path $BackendBuildFile) {
+    Remove-Item -LiteralPath $BackendBuildFile -Force
+}
+if (Test-Path $BackendBuildDir) {
+    Remove-Item -LiteralPath $BackendBuildDir -Recurse -Force
+}
 Invoke-Checked $Python @(
     "-m",
     "PyInstaller",
     "--clean",
     "--noconfirm",
-    "--onefile",
     "--name",
     "gn-slop-backend",
     "--add-data",
@@ -65,7 +80,12 @@ if (Test-Path $DesktopBackend) {
     Remove-Item -LiteralPath $DesktopBackend -Recurse -Force
 }
 New-Item -ItemType Directory -Path $DesktopBackend | Out-Null
-Copy-Item -LiteralPath "dist\gn-slop-backend.exe" -Destination (Join-Path $DesktopBackend "gn-slop-backend.exe")
+if (-not (Test-Path (Join-Path $BackendBuildDir "gn-slop-backend.exe"))) {
+    throw "Missing backend executable: $BackendBuildDir\gn-slop-backend.exe"
+}
+Get-ChildItem -LiteralPath $BackendBuildDir | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $DesktopBackend -Recurse -Force
+}
 
 Write-Host "Installing Electron dependencies..."
 Invoke-Checked "npm" @("install")
