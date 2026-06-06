@@ -30,17 +30,17 @@
             </svg>
             API Docs
           </a>
-          <a class="nav-item" href="/health">
+          <button class="nav-item" id="healthButton" type="button">
             <svg aria-hidden="true" viewBox="0 0 24 24">
               <path d="M20 7 9 18l-5-5" />
             </svg>
             Health
-          </a>
+          </button>
         </nav>
 
         <div class="sidebar-footer">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span>Local service online</span>
+          <span class="status-dot" id="healthDot" aria-hidden="true"></span>
+          <span id="healthLabel">Checking service</span>
         </div>
       </aside>
 

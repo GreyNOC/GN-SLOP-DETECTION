@@ -28,6 +28,9 @@ const sourceCard = document.querySelector("#sourceCard");
 const sourceKind = document.querySelector("#sourceKind");
 const sourceTitle = document.querySelector("#sourceTitle");
 const sourceUrl = document.querySelector("#sourceUrl");
+const healthButton = document.querySelector("#healthButton");
+const healthDot = document.querySelector("#healthDot");
+const healthLabel = document.querySelector("#healthLabel");
 
 const sampleText =
   "This revolutionary solution leverages next-generation synergy to unlock unprecedented outcomes with no evidence provided. Experts agree it will always optimize every workflow, yet the report does not include dates, measurements, owner names, or source links.";
@@ -278,6 +281,32 @@ async function analyzeText(event) {
   }
 }
 
+function setHealth(state, label) {
+  if (!healthDot || !healthLabel) {
+    return;
+  }
+  healthDot.classList.remove("ok", "error");
+  if (state === "ok" || state === "error") {
+    healthDot.classList.add(state);
+  }
+  healthLabel.textContent = label;
+}
+
+async function checkHealth() {
+  setHealth(null, "Checking service");
+  try {
+    const response = await fetch("/health", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    const environment = payload.environment ? ` • ${payload.environment}` : "";
+    setHealth("ok", `Backend ok${environment}`);
+  } catch (error) {
+    setHealth("error", "Backend unreachable");
+  }
+}
+
 async function loadThreshold() {
   try {
     const response = await fetch("/api/v1/threshold");
@@ -325,3 +354,11 @@ updateCounter();
 loadThreshold();
 renderDimensions([]);
 renderProfile(null);
+
+if (healthButton) {
+  healthButton.addEventListener("click", () => {
+    checkHealth();
+  });
+}
+checkHealth();
+window.setInterval(checkHealth, 30000);

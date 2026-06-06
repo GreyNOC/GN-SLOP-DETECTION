@@ -115,6 +115,14 @@ button:disabled {
   text-decoration: none;
 }
 
+button.nav-item {
+  width: 100%;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .nav-item svg,
 .icon-button svg,
 .primary-button svg {
@@ -150,7 +158,15 @@ button:disabled {
   width: 9px;
   height: 9px;
   flex: 0 0 auto;
+  background: var(--amber);
+}
+
+.status-dot.ok {
   background: var(--green);
+}
+
+.status-dot.error {
+  background: var(--red);
 }
 
 .workspace {
