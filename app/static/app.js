@@ -57,6 +57,21 @@ function formatPercent(value) {
   return `${Math.round((Number(value) || 0) * 100)}%`;
 }
 
+function safeHttpUrl(value) {
+  if (typeof value !== "string" || value === "") {
+    return null;
+  }
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return parsed.href;
+    }
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
+
 function setState(label, isBusy = false) {
   requestState.textContent = label;
   analyzeButton.disabled = isBusy;
@@ -174,8 +189,14 @@ function renderSource(payload) {
     sourceCard.hidden = false;
     sourceKind.textContent = "Website";
     sourceTitle.textContent = payload.website.title || payload.source || "Fetched page";
-    sourceUrl.textContent = payload.website.final_url;
-    sourceUrl.href = payload.website.final_url;
+    const finalUrl = payload.website.final_url || "";
+    const safeUrl = safeHttpUrl(finalUrl);
+    sourceUrl.textContent = finalUrl;
+    if (safeUrl) {
+      sourceUrl.href = safeUrl;
+    } else {
+      sourceUrl.removeAttribute("href");
+    }
     return;
   }
 

@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     web_fetch_timeout_seconds: float = Field(default=8.0, alias="WEB_FETCH_TIMEOUT_SECONDS")
     web_fetch_max_bytes: int = Field(default=1_048_576, alias="WEB_FETCH_MAX_BYTES")
     allow_private_urls: bool = Field(default=False, alias="ALLOW_PRIVATE_URLS")
+    rate_limit_requests: int = Field(default=120, alias="RATE_LIMIT_REQUESTS")
+    rate_limit_window_seconds: float = Field(default=60.0, alias="RATE_LIMIT_WINDOW_SECONDS")
+    rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
 
     model_config = SettingsConfigDict(env_file=".env", populate_by_name=True, extra="ignore")
 

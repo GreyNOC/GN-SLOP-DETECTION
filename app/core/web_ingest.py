@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Final
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from app.core.settings import get_settings
@@ -20,6 +20,7 @@ TEXT_CONTENT_TYPES: Final = {
 MAX_URL_LENGTH: Final = 2048
 MAX_REDIRECTS: Final = 5
 ALLOWED_PORTS: Final = {80, 443}
+ALLOWED_CONTENT_ENCODINGS: Final = {"", "identity"}
 CONTROL_OR_SPACE_RE: Final = re.compile(r"[\x00-\x20\x7f]")
 
 
@@ -49,7 +50,9 @@ class SafeRedirectHandler(HTTPRedirectHandler):
             raise WebsiteFetchError("Website redirected too many times.")
 
         safe_url = urljoin(req.full_url, newurl)
-        _validate_public_url(safe_url, self.allow_private_urls)
+        # Re-run full validation on every redirect target so DNS rebinding or
+        # cross-protocol bounces are rejected at the same gate as the original URL.
+        safe_url = _enforce_url_policy(safe_url, self.allow_private_urls)
         return super().redirect_request(req, fp, code, msg, headers, safe_url)
 
 
@@ -113,12 +116,15 @@ def normalize_website_url(url: str) -> str:
 def fetch_website_text(url: str) -> FetchedWebsite:
     settings = get_settings()
     normalized_url = normalize_website_url(url)
-    _validate_public_url(normalized_url, settings.allow_private_urls)
+    sanitized_url = _enforce_url_policy(normalized_url, settings.allow_private_urls)
 
     request = Request(
-        normalized_url,
+        sanitized_url,
         headers={
             "Accept": "text/html,text/plain,application/xhtml+xml;q=0.9,*/*;q=0.5",
+            # Refuse compressed responses so a tiny gzipped payload cannot expand
+            # past the configured byte cap during decoding.
+            "Accept-Encoding": "identity",
             "User-Agent": "GreyNOC-Slop-Detection/0.1",
         },
         method="GET",
@@ -128,15 +134,43 @@ def fetch_website_text(url: str) -> FetchedWebsite:
     try:
         with opener.open(request, timeout=settings.web_fetch_timeout_seconds) as response:
             final_url = response.geturl()
-            _validate_public_url(final_url, settings.allow_private_urls)
+            # Validate the post-redirect URL one last time before consuming the
+            # response body — defence in depth against any redirect we missed.
+            _enforce_url_policy(final_url, settings.allow_private_urls)
+
             content_type = response.headers.get_content_type()
             if content_type not in TEXT_CONTENT_TYPES:
                 raise WebsiteFetchError(f"Unsupported content type: {content_type}")
+
+            content_encoding = (response.headers.get("Content-Encoding") or "").strip().lower()
+            if content_encoding and content_encoding not in ALLOWED_CONTENT_ENCODINGS:
+                raise WebsiteFetchError(
+                    f"Unsupported content encoding: {content_encoding}"
+                )
+
+            announced_length = response.headers.get("Content-Length")
+            if announced_length is not None:
+                try:
+                    announced = int(announced_length)
+                except ValueError as error:
+                    raise WebsiteFetchError("Server returned an invalid Content-Length.") from error
+                if announced > settings.web_fetch_max_bytes:
+                    raise WebsiteFetchError(
+                        "Website response exceeded the configured analysis limit."
+                    )
+
             charset = response.headers.get_content_charset() or "utf-8"
             raw = response.read(settings.web_fetch_max_bytes + 1)
             if len(raw) > settings.web_fetch_max_bytes:
                 raise WebsiteFetchError("Website response exceeded the configured analysis limit.")
-            body = raw.decode(charset, errors="replace")
+
+            try:
+                body = raw.decode(charset, errors="replace")
+            except LookupError as error:
+                # Unknown charset names land here; fall back to utf-8 to keep
+                # the analysis useful instead of aborting the whole request.
+                body = raw.decode("utf-8", errors="replace")
+                del error
             status_code = response.status
     except WebsiteFetchError:
         raise
@@ -148,7 +182,7 @@ def fetch_website_text(url: str) -> FetchedWebsite:
     except TimeoutError as error:
         raise WebsiteFetchError("Website fetch timed out.") from error
 
-    if content_type == "text/html" or content_type == "application/xhtml+xml":
+    if content_type in {"text/html", "application/xhtml+xml"}:
         parser = ReadableHTMLParser()
         parser.feed(body)
         text = parser.text
@@ -171,7 +205,13 @@ def fetch_website_text(url: str) -> FetchedWebsite:
     )
 
 
-def _validate_public_url(url: str, allow_private_urls: bool) -> None:
+def _enforce_url_policy(url: str, allow_private_urls: bool) -> str:
+    """Validate URL safety and return a sanitized form with the host punycoded.
+
+    Returning a sanitized URL forces every later step (request, redirect) to
+    use the same hostname we just validated, removing a class of bypasses that
+    rely on differences between the URL we checked and the URL we connected to.
+    """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise WebsiteFetchError("Only http and https URLs can be analyzed.")
@@ -189,8 +229,32 @@ def _validate_public_url(url: str, allow_private_urls: bool) -> None:
         raise WebsiteFetchError("URL contains an invalid port.") from error
     if port is not None and port not in ALLOWED_PORTS:
         raise WebsiteFetchError("Only standard website ports 80 and 443 are supported.")
-    if not allow_private_urls and _host_is_private(parsed.hostname):
+
+    hostname = parsed.hostname
+    ascii_hostname = _ascii_hostname(hostname)
+    if not allow_private_urls and _host_is_private(ascii_hostname):
         raise WebsiteFetchError("Private, local, and reserved network URLs are not enabled.")
+
+    # Rebuild netloc with the ASCII hostname so the connection target matches
+    # exactly what we validated. This blocks IDN-homograph payloads from
+    # silently re-resolving to a different host during the actual fetch.
+    netloc = ascii_hostname
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    sanitized = parsed._replace(netloc=netloc)
+    return urlunparse(sanitized)
+
+
+def _ascii_hostname(hostname: str) -> str:
+    try:
+        ipaddress.ip_address(hostname)
+        return hostname
+    except ValueError:
+        pass
+    try:
+        return hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as error:
+        raise WebsiteFetchError("URL host is invalid or contains unsupported characters.") from error
 
 
 def _host_is_private(hostname: str) -> bool:
@@ -222,3 +286,8 @@ def _address_is_private(address: ipaddress.IPv4Address | ipaddress.IPv6Address) 
 
 def _clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+# Backwards-compat alias for callers that imported the underscore-prefixed
+# validator from the previous version.
+_validate_public_url = _enforce_url_policy
