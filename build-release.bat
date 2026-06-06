@@ -4,7 +4,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0" || goto fail
 
 set "APP_NAME=GreyNOC-Slop-Detection"
-set "VERSION=0.2.2"
+set "VERSION=0.3.0"
 set "RELEASE_ROOT=github-release"
 set "RELEASE_DIR=%RELEASE_ROOT%\%APP_NAME%-v%VERSION%-windows"
 set "VENV_PYTHON=.venv\Scripts\python.exe"

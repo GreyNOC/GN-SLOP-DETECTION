@@ -101,6 +101,9 @@
               <button class="mode-button" id="urlModeButton" type="button" role="tab" aria-selected="false">
                 Website
               </button>
+              <button class="mode-button" id="mediaModeButton" type="button" role="tab" aria-selected="false">
+                Media
+              </button>
             </div>
 
             <label class="field-label" for="sourceInput">Source</label>
@@ -135,6 +138,18 @@
                 placeholder="Paste content for review"
                 required
               ></textarea>
+            </div>
+
+            <div id="mediaField" hidden>
+              <label class="field-label" for="mediaInput">Media file</label>
+              <input
+                class="source-input"
+                id="mediaInput"
+                name="media"
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif,image/heic,image/heif,image/avif,video/mp4,video/quicktime,video/webm"
+              />
+              <p class="field-hint">PNG, JPEG, WebP, HEIC, MP4, MOV, WebM. Scanned locally for C2PA, JUMBF, SynthID, and 13+ generator fingerprints.</p>
             </div>
 
             <div class="form-actions">

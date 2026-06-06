@@ -2,10 +2,13 @@ const form = document.querySelector("#analysisForm");
 const textInput = document.querySelector("#textInput");
 const sourceInput = document.querySelector("#sourceInput");
 const urlInput = document.querySelector("#urlInput");
+const mediaInput = document.querySelector("#mediaInput");
 const textField = document.querySelector("#textField");
 const urlField = document.querySelector("#urlField");
+const mediaField = document.querySelector("#mediaField");
 const textModeButton = document.querySelector("#textModeButton");
 const urlModeButton = document.querySelector("#urlModeButton");
+const mediaModeButton = document.querySelector("#mediaModeButton");
 const analyzeButton = document.querySelector("#analyzeButton");
 const sampleButton = document.querySelector("#sampleButton");
 const clearButton = document.querySelector("#clearButton");
@@ -82,18 +85,34 @@ function setState(label, isBusy = false) {
 
 function setMode(mode) {
   inputMode = mode;
-  const isUrlMode = mode === "website";
-  textField.hidden = isUrlMode;
-  urlField.hidden = !isUrlMode;
-  textInput.required = !isUrlMode;
-  urlInput.required = isUrlMode;
-  textModeButton.classList.toggle("active", !isUrlMode);
-  urlModeButton.classList.toggle("active", isUrlMode);
-  textModeButton.setAttribute("aria-selected", String(!isUrlMode));
-  urlModeButton.setAttribute("aria-selected", String(isUrlMode));
+  const isText = mode === "text";
+  const isUrl = mode === "website";
+  const isMedia = mode === "media";
+  textField.hidden = !isText;
+  urlField.hidden = !isUrl;
+  if (mediaField) {
+    mediaField.hidden = !isMedia;
+  }
+  textInput.required = isText;
+  urlInput.required = isUrl;
+  if (mediaInput) {
+    mediaInput.required = isMedia;
+  }
+  textModeButton.classList.toggle("active", isText);
+  urlModeButton.classList.toggle("active", isUrl);
+  if (mediaModeButton) {
+    mediaModeButton.classList.toggle("active", isMedia);
+  }
+  textModeButton.setAttribute("aria-selected", String(isText));
+  urlModeButton.setAttribute("aria-selected", String(isUrl));
+  if (mediaModeButton) {
+    mediaModeButton.setAttribute("aria-selected", String(isMedia));
+  }
   updateCounter();
-  if (isUrlMode) {
+  if (isUrl) {
     urlInput.focus();
+  } else if (isMedia && mediaInput) {
+    mediaInput.focus();
   } else {
     textInput.focus();
   }
@@ -102,6 +121,16 @@ function setMode(mode) {
 function updateCounter() {
   if (inputMode === "website") {
     charCounter.textContent = `${urlInput.value.length.toLocaleString()} URL chars`;
+    return;
+  }
+  if (inputMode === "media") {
+    const file = mediaInput?.files?.[0];
+    if (file) {
+      const kb = Math.max(1, Math.round(file.size / 1024));
+      charCounter.textContent = `${kb.toLocaleString()} KB ${file.name}`;
+    } else {
+      charCounter.textContent = "no file selected";
+    }
     return;
   }
   charCounter.textContent = `${textInput.value.length.toLocaleString()} chars`;
@@ -215,6 +244,75 @@ function renderSource(payload) {
   sourceCard.hidden = true;
 }
 
+function renderMediaResult(payload) {
+  const score = Number(payload.score) || 0;
+  const risk = payload.risk || "neutral";
+  const riskLabel = riskLabels[risk] || "Ready";
+  const scorePercent = Math.round(score * 100);
+  riskMetric.textContent = riskLabel;
+  scoreMetric.textContent = score.toFixed(3);
+  wordMetric.textContent = Number(payload.byte_size || 0).toLocaleString();
+  signalMetric.textContent = Number((payload.findings || []).length).toLocaleString();
+  riskPill.textContent = riskLabel;
+  setRiskClass(risk);
+  scoreFill.style.width = `${scorePercent}%`;
+  dialScore.textContent = `${scorePercent}%`;
+  recommendation.textContent =
+    payload.recommendation || "No major media provenance markers detected.";
+
+  if (sourceCard) {
+    sourceCard.hidden = false;
+    sourceKind.textContent = `Media · ${payload.format || "unknown"}`;
+    sourceTitle.textContent = payload.file_name || payload.source || "Uploaded media";
+    sourceUrl.textContent = "";
+    sourceUrl.removeAttribute("href");
+  }
+
+  const findings = payload.findings || [];
+  if (!findings.length) {
+    signalsTable.innerHTML = '<tr><td colspan="5" class="empty-cell">No provenance markers detected.</td></tr>';
+  } else {
+    signalsTable.innerHTML = findings
+      .map(
+        (finding) => `
+          <tr>
+            <td>${escapeHtml(finding.marker)}</td>
+            <td>${escapeHtml(finding.confidence)}</td>
+            <td>—</td>
+            <td>1</td>
+            <td>${escapeHtml(finding.detail || "")}</td>
+          </tr>
+        `,
+      )
+      .join("");
+  }
+
+  const flags = [
+    ["C2PA manifest", payload.has_c2pa_manifest ? "Yes" : "No"],
+    ["JUMBF box", payload.has_jumbf_box ? "Yes" : "No"],
+    ["XMP packet", payload.has_xmp_packet ? "Yes" : "No"],
+    ["SynthID marker", payload.has_synthid_marker ? "Yes" : "No"],
+    ["Tool fingerprints", (payload.tool_fingerprints || []).join(", ") || "None"],
+    ["Trailing bytes", Number(payload.trailing_bytes || 0).toLocaleString()],
+    ["Format", payload.format || "unknown"],
+    ["Kind", payload.kind || "unknown"],
+    ["Algorithm", payload.algorithm || "media-picture-v1"],
+  ];
+  profileGrid.innerHTML = flags
+    .map(
+      ([label, value]) => `
+        <div class="profile-item">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(String(value))}</strong>
+        </div>
+      `,
+    )
+    .join("");
+
+  dimensionGrid.innerHTML =
+    '<div class="empty-block">Dimension scores apply to text analysis only.</div>';
+}
+
 function renderResult(payload) {
   const score = Number(payload.score) || 0;
   const risk = payload.risk || "neutral";
@@ -242,6 +340,7 @@ async function analyzeText(event) {
   const source = sourceInput.value.trim() || null;
   const text = textInput.value.trim();
   const url = urlInput.value.trim();
+  const mediaFile = mediaInput?.files?.[0] || null;
 
   if (inputMode === "text" && !text) {
     textInput.focus();
@@ -255,25 +354,46 @@ async function analyzeText(event) {
     return;
   }
 
+  if (inputMode === "media" && !mediaFile) {
+    mediaInput?.focus();
+    setState("Media file required");
+    return;
+  }
+
   setState("Analyzing", true);
 
   try {
-    const endpoint = inputMode === "website" ? "/api/v1/analyze-url" : "/api/v1/analyze";
-    const body = inputMode === "website" ? { source, url } : { source, text };
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
+    let response;
+    if (inputMode === "media") {
+      const formData = new FormData();
+      formData.append("file", mediaFile);
+      if (source) {
+        formData.append("source", source);
+      }
+      response = await fetch("/api/v1/analyze-media", {
+        method: "POST",
+        body: formData,
+      });
+    } else {
+      const endpoint = inputMode === "website" ? "/api/v1/analyze-url" : "/api/v1/analyze";
+      const body = inputMode === "website" ? { source, url } : { source, text };
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
 
     const payload = await response.json();
     if (!response.ok) {
       throw new Error(payload.detail || `Analysis failed with ${response.status}`);
     }
 
-    renderResult(payload);
+    if (inputMode === "media") {
+      renderMediaResult(payload);
+    } else {
+      renderResult(payload);
+    }
     setState("Complete");
   } catch (error) {
     setState("Request failed");
@@ -347,8 +467,14 @@ clearButton.addEventListener("click", () => {
 
 textModeButton.addEventListener("click", () => setMode("text"));
 urlModeButton.addEventListener("click", () => setMode("website"));
+if (mediaModeButton) {
+  mediaModeButton.addEventListener("click", () => setMode("media"));
+}
 textInput.addEventListener("input", updateCounter);
 urlInput.addEventListener("input", updateCounter);
+if (mediaInput) {
+  mediaInput.addEventListener("change", updateCounter);
+}
 form.addEventListener("submit", analyzeText);
 updateCounter();
 loadThreshold();

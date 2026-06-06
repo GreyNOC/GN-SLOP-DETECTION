@@ -6,6 +6,7 @@ MAX_TEXT_LENGTH: Final = 200_000
 MAX_SOURCE_LENGTH: Final = 256
 MAX_URL_LENGTH: Final = 2_048
 MAX_BATCH_ITEMS: Final = 25
+MAX_MEDIA_FILENAME_LENGTH: Final = 256
 
 
 class AnalyzeRequest(BaseModel):
@@ -91,3 +92,29 @@ class BatchAnalyzeRequest(BaseModel):
 
 class BatchAnalyzeResponse(BaseModel):
     results: list[AnalyzeResponse]
+
+
+class MediaFinding(BaseModel):
+    marker: str
+    confidence: str
+    detail: str | None = None
+
+
+class MediaAnalysisResponse(BaseModel):
+    source: str | None = None
+    file_name: str | None = None
+    format: str
+    kind: str
+    byte_size: int
+    algorithm: str
+    score: float = Field(..., ge=0.0, le=1.0)
+    risk: str
+    has_c2pa_manifest: bool
+    has_jumbf_box: bool
+    has_xmp_packet: bool
+    has_synthid_marker: bool
+    trailing_bytes: int
+    generative_metadata_keys: list[str]
+    tool_fingerprints: list[str]
+    findings: list[MediaFinding]
+    recommendation: str
