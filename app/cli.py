@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from app.core.detector import DetectionResult, SlopDetector
+from app.core.media_detector import MediaAnalysis, analyze_media
 from app.core.web_ingest import FetchedWebsite, WebsiteFetchError, fetch_website_text
+
+MEDIA_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".heif", ".avif",
+    ".mp4", ".m4v", ".mov", ".webm",
+}
 
 SPLASH = r"""
 +------------------------------------------------------------------------------+
@@ -147,6 +153,47 @@ def analyze_website_target(target: str, source: str | None) -> dict[str, Any]:
     return result_payload(result, source or website.title or website.final_url, "website", website)
 
 
+def media_payload(analysis: MediaAnalysis, source: str | None) -> dict[str, Any]:
+    return {
+        "source": source,
+        "input_type": "media",
+        "format": analysis.format.value,
+        "kind": analysis.kind.value,
+        "byte_size": analysis.byte_size,
+        "algorithm": analysis.algorithm,
+        "score": analysis.score,
+        "risk": analysis.risk,
+        "has_c2pa_manifest": analysis.has_c2pa_manifest,
+        "has_jumbf_box": analysis.has_jumbf_box,
+        "has_xmp_packet": analysis.has_xmp_packet,
+        "has_synthid_marker": analysis.has_synthid_marker,
+        "trailing_bytes": analysis.trailing_bytes,
+        "generative_metadata_keys": list(analysis.generative_metadata_keys),
+        "tool_fingerprints": list(analysis.tool_fingerprints),
+        "findings": [
+            {"marker": finding.marker, "confidence": finding.confidence, "detail": finding.detail}
+            for finding in analysis.findings
+        ],
+        "recommendation": analysis.recommendation,
+    }
+
+
+def analyze_media_path(path: Path, source: str | None) -> dict[str, Any]:
+    data = path.read_bytes()
+    analysis = analyze_media(data)
+    return media_payload(analysis, source or str(path))
+
+
+def analyze_media_command(args: argparse.Namespace) -> int:
+    path = Path(args.path)
+    if not path.exists() or not path.is_file():
+        print(json.dumps({"error": f"Media file not found: {path}"}), file=sys.stderr)
+        return 1
+    payload = analyze_media_path(path, args.source)
+    print_json(payload, args.pretty)
+    return 0
+
+
 def analyze_url(args: argparse.Namespace) -> int:
     try:
         payload = analyze_website_target(args.url, args.source)
@@ -164,6 +211,23 @@ def review_target(args: argparse.Namespace) -> int:
 
     try:
         if path.exists():
+            if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS:
+                payload = analyze_media_path(path, args.source or str(path))
+                if args.json:
+                    print_json(payload, args.pretty)
+                else:
+                    print(f"GreyNOC Media Review: {payload['source']}")
+                    print(
+                        f"Format: {payload['format']}  Kind: {payload['kind']}  "
+                        f"Risk: {payload['risk'].upper()}  Score: {payload['score']:.3f}"
+                    )
+                    if payload["findings"]:
+                        print("Findings:")
+                        for finding in payload["findings"][:8]:
+                            print(f"  - [{finding['confidence']}] {finding['marker']}")
+                    print(f"Recommendation: {payload['recommendation']}")
+                return 0
+
             payload = analyze_file_path(path, args.recursive)
             if args.json:
                 print_json(payload, args.pretty)
@@ -229,6 +293,12 @@ def build_parser() -> argparse.ArgumentParser:
     url_parser.add_argument("--source", help="Optional source label.")
     url_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     url_parser.set_defaults(handler=analyze_url)
+
+    media_parser = subparsers.add_parser("media", help="Scan an image or video for AI / provenance markers.")
+    media_parser.add_argument("path", help="Path to an image or video file (.png, .jpg, .mp4, etc.).")
+    media_parser.add_argument("--source", help="Optional source label.")
+    media_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    media_parser.set_defaults(handler=analyze_media_command)
 
     return parser
 

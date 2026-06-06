@@ -154,6 +154,12 @@ button.nav-item {
   font-size: 0.86rem;
 }
 
+.field-hint {
+  margin: 6px 0 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .status-dot {
   width: 9px;
   height: 9px;
