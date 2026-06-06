@@ -1,6 +1,6 @@
 [project]
 name = "gn-slop-detection"
-version = "0.3.0"
+version = "0.3.1"
 description = "GreyNOC slop detection API and CLI"
 requires-python = ">=3.11"
 dependencies = [

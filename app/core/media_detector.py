@@ -87,7 +87,12 @@ class MediaAnalysis:
     score: float = 0.0
     risk: str = "low"
     recommendation: str = ""
-    algorithm: str = "media-picture-v1"
+    algorithm: str = "media-picture-v2"
+    # Structural ISO BMFF / container details surfaced for video heuristics.
+    ftyp_brand: str = ""
+    compatible_brands: list[str] = field(default_factory=list)
+    video_track_count: int = 0
+    audio_track_count: int = 0
 
 
 _MAX_DECODED_TEXT: Final = 8 * 1024
@@ -106,27 +111,68 @@ _ISOBMFF_CONTAINER_BOXES: Final = frozenset(
 )
 
 # Bundled-in list of generators / tools we recognize in decoded binary
-# text. Kept tight: the goal is to enrich `tool_fingerprints` so the report
-# can say "Stable Diffusion WebUI" instead of generically "AI markers
-# found".  The patterns mirror Aegis BINARY_TOOL_PATTERNS plus video-side
-# generator names that show up in MP4 metadata.
-_TOOL_PATTERNS: Final[list[tuple[str, re.Pattern[str]]]] = [
-    ("Stable Diffusion WebUI (A1111)", re.compile(r"Steps:\s*\d+,\s*Sampler|sd[-_]?metadata", re.IGNORECASE)),
-    ("ComfyUI", re.compile(r"ComfyUI|\"workflow\"\s*:", re.IGNORECASE)),
-    ("InvokeAI", re.compile(r"invokeai_metadata|invoke[-_]?ai", re.IGNORECASE)),
-    ("DALL-E / OpenAI", re.compile(r"dall[\-·]?e|openai", re.IGNORECASE)),
-    ("Midjourney", re.compile(r"midjourney|--ar\s+\d", re.IGNORECASE)),
-    ("Adobe Firefly", re.compile(r"firefly|adobe\s*firefly", re.IGNORECASE)),
-    ("Google SynthID", re.compile(r"synthid|generative.?ai.?(provenance|watermark)", re.IGNORECASE)),
+# text. Each entry carries a confidence so a soft signal (e.g. a generic
+# software encoder name) doesn't get the same weight as a hard provenance
+# marker (e.g. C2PA or SynthID).
+#
+# Patterns mirror Aegis BINARY_TOOL_PATTERNS plus video-pipeline tells.
+# Video-specific notes:
+#   - libavformat ("Lavf" writer string) is by far the most common
+#     signature of an AI video export, because Sora, Runway, Pika, Luma,
+#     and most local pipelines run their output through FFmpeg. It is
+#     also legitimately used by hand-edited video, so we keep its
+#     standalone confidence at "medium" — a composite finding below
+#     escalates when it co-occurs with other AI-pipeline tells.
+#   - x264/x265 are pure software encoders; phones and cameras use
+#     hardware encoders, so their presence alone is a low-confidence
+#     hint that the file went through a post-process re-encode.
+_TOOL_PATTERNS: Final[list[tuple[str, re.Pattern[str], str]]] = [
+    ("Stable Diffusion WebUI (A1111)", re.compile(r"Steps:\s*\d+,\s*Sampler|sd[-_]?metadata", re.IGNORECASE), "high"),
+    ("ComfyUI", re.compile(r"ComfyUI|\"workflow\"\s*:", re.IGNORECASE), "high"),
+    ("InvokeAI", re.compile(r"invokeai_metadata|invoke[-_]?ai", re.IGNORECASE), "high"),
+    ("DALL-E / OpenAI", re.compile(r"dall[\-·]?e|\bopenai\b", re.IGNORECASE), "high"),
+    ("Midjourney", re.compile(r"midjourney|--ar\s+\d", re.IGNORECASE), "high"),
+    ("Adobe Firefly", re.compile(r"firefly|adobe\s*firefly", re.IGNORECASE), "high"),
+    ("Google SynthID", re.compile(r"synthid|generative.?ai.?(provenance|watermark)", re.IGNORECASE), "high"),
     (
         "C2PA Content Credentials",
         re.compile(r"c2pa\.org|c2pa\.claim_generator|content\s*credentials|contentauth", re.IGNORECASE),
+        "high",
     ),
-    ("Adobe Photoshop", re.compile(r"photoshop|adobe\s*xmp\s*core|xmp:CreatorTool", re.IGNORECASE)),
-    ("Runway", re.compile(r"runwayml|runway[\s\-_]*gen[\s\-_]*\d", re.IGNORECASE)),
-    ("Pika", re.compile(r"pika[-_]?labs|pika[-_]?\d", re.IGNORECASE)),
-    ("Sora / OpenAI", re.compile(r"sora\s*(by\s*openai|video)?", re.IGNORECASE)),
-    ("Luma Dream Machine", re.compile(r"luma\s*ai|dream\s*machine", re.IGNORECASE)),
+    ("Adobe Photoshop", re.compile(r"photoshop|adobe\s*xmp\s*core|xmp:CreatorTool", re.IGNORECASE), "medium"),
+    ("Runway", re.compile(r"runwayml|runway[\s\-_]*gen[\s\-_]*\d", re.IGNORECASE), "high"),
+    ("Pika", re.compile(r"pika[\s\-_]*labs|pika[\s\-_]*\d", re.IGNORECASE), "high"),
+    (
+        "OpenAI Sora / ChatGPT (literal)",
+        re.compile(
+            r"\bsora\s*(?:by\s*openai|video)?\b"
+            r"|chatgpt[^a-z]*(?:video|image|media|generation)"
+            r"|gpt[\-_]?image"
+            r"|gpt[\-_]?vision"
+            r"|made\s+(?:with|by)\s+chatgpt"
+            r"|generated\s+(?:with|by)\s+chatgpt",
+            re.IGNORECASE,
+        ),
+        "high",
+    ),
+    ("Luma Dream Machine", re.compile(r"luma\s*ai|dream\s*machine", re.IGNORECASE), "high"),
+    (
+        "FFmpeg / libavformat pipeline",
+        # No \b on Lavf/Lavc/Lavu/Lavd: these strings sit immediately after
+        # binary length/locale bytes in QuickTime atoms (e.g., "\xc4Lavf"),
+        # and the preceding byte often decodes as a Latin extended letter
+        # which defeats the \w boundary. The literals are distinctive
+        # enough that prefix-anchored is unnecessary.
+        re.compile(
+            r"Lavf\d|Lavc\d|Lavu\d|Lavd\d"
+            r"|libavformat|libavcodec|libavutil|libavdevice"
+            r"|libswscale|libswresample|ffmpeg",
+            re.IGNORECASE,
+        ),
+        "medium",
+    ),
+    ("x264 software encoder", re.compile(r"(?:^|[^A-Za-z])x264|libx264", re.IGNORECASE), "low"),
+    ("x265 / HEVC software encoder", re.compile(r"(?:^|[^A-Za-z])x265|libx265", re.IGNORECASE), "low"),
 ]
 
 
@@ -358,13 +404,26 @@ def _parse_isobmff(data: bytes, format_: MediaFormat) -> MediaAnalysis:
     analysis = _empty(format_, len(data))
     decoded_parts: list[str] = []
     last_box_end = 0
+    # Skip mdat payloads when harvesting text — they're the compressed
+    # media stream and decoding them as latin-1 just adds noise. Other
+    # leaf boxes get their payloads scraped because tool / writer strings
+    # commonly hide in atoms we haven't enumerated explicitly.
+    _SKIP_TEXT_HARVEST: Final = frozenset({b"mdat", b"wide", b"free", b"skip", b"junk"})
 
-    for box_type, payload_start, payload_end, depth in _iter_isobmff_boxes(data, 0, len(data)):
+    for box_type, payload_start, payload_end, _depth in _iter_isobmff_boxes(data, 0, len(data)):
         last_box_end = max(last_box_end, payload_end)
 
         if box_type == b"ftyp":
-            brand = _decode_latin1(data, payload_start, min(payload_start + 4, payload_end))
-            analysis.generative_metadata_keys.append(f"ftyp:{brand.strip()}")
+            brand = _decode_latin1(data, payload_start, min(payload_start + 4, payload_end)).strip()
+            analysis.ftyp_brand = brand
+            analysis.generative_metadata_keys.append(f"ftyp:{brand or 'unknown'}")
+            # Compatible brands run from offset 8 to end, 4 bytes each.
+            cb_start = payload_start + 8
+            while cb_start + 4 <= payload_end:
+                cb = _decode_latin1(data, cb_start, cb_start + 4).strip()
+                if cb:
+                    analysis.compatible_brands.append(cb)
+                cb_start += 4
         elif box_type == b"uuid":
             uuid = data[payload_start : payload_start + 16] if payload_end - payload_start >= 16 else b""
             if uuid == _C2PA_UUID:
@@ -376,28 +435,23 @@ def _parse_isobmff(data: bytes, format_: MediaFormat) -> MediaAnalysis:
                 )
             else:
                 analysis.generative_metadata_keys.append("uuid box")
-        elif box_type in (
-            b"data",
-            b"\xa9too",
-            b"\xa9nam",
-            b"\xa9cmt",
-            b"\xa9ART",
-            b"\xa9day",
-            b"\xa9gen",
-            b"\xa9swr",
-        ):
-            # iTunes-style metadata atoms commonly carry tool names.
-            text = _decode_latin1(data, payload_start, min(payload_end, payload_start + 1024))
-            decoded_parts.append(text)
         elif box_type == b"hdlr":
+            # Handler reference. Layout: 1+3 (version+flags), 4 pre_defined,
+            # 4 handler_type, 12 reserved, name. The handler_type at offset
+            # 8..12 of the payload tells us if the parent track is video,
+            # sound, hint, or metadata.
+            if payload_end - payload_start >= 12:
+                handler_type = data[payload_start + 8 : payload_start + 12]
+                if handler_type == b"vide":
+                    analysis.video_track_count += 1
+                elif handler_type == b"soun":
+                    analysis.audio_track_count += 1
             decoded_parts.append(_decode_latin1(data, payload_start, min(payload_end, payload_start + 256)))
-        # Only descend into containers OR harvest top-level user-data text.
-        # Walking into compressed media boxes (mdat etc.) would just produce
-        # noise, so we deliberately skip them.
-
-        if depth == 0 and box_type == b"mdat":
-            # mdat carries the compressed media payload; don't peek at it.
-            continue
+        elif box_type not in _SKIP_TEXT_HARVEST and box_type not in _ISOBMFF_CONTAINER_BOXES:
+            # Broad text harvest for any leaf box we haven't classified.
+            # Caps each box at 1 KB of payload so the overall sample stays
+            # bounded even on files with many small metadata atoms.
+            decoded_parts.append(_decode_latin1(data, payload_start, min(payload_end, payload_start + 1024)))
 
     if last_box_end and last_box_end < len(data):
         analysis.trailing_bytes = len(data) - last_box_end
@@ -407,11 +461,16 @@ def _parse_isobmff(data: bytes, format_: MediaFormat) -> MediaAnalysis:
 
 def _enrich_with_fingerprints(analysis: MediaAnalysis) -> None:
     text = analysis.decoded_text_sample
+    # Each fingerprint hit is paired with its per-pattern confidence so the
+    # downstream scorer can weight a hard provenance marker differently
+    # from a generic encoder string.
+    fingerprint_confidence: dict[str, str] = {}
     if text:
         seen = set(analysis.tool_fingerprints)
-        for name, pattern in _TOOL_PATTERNS:
+        for name, pattern, confidence in _TOOL_PATTERNS:
             if name not in seen and pattern.search(text):
                 analysis.tool_fingerprints.append(name)
+                fingerprint_confidence[name] = confidence
                 seen.add(name)
 
     if analysis.has_c2pa_manifest:
@@ -451,7 +510,134 @@ def _enrich_with_fingerprints(analysis: MediaAnalysis) -> None:
         )
     for tool in analysis.tool_fingerprints:
         analysis.findings.append(
-            MediaFinding(marker=f"Binary fingerprint: {tool}", confidence="high")
+            MediaFinding(
+                marker=f"Binary fingerprint: {tool}",
+                confidence=fingerprint_confidence.get(tool, "high"),
+            )
+        )
+
+    _add_video_pipeline_findings(analysis)
+
+
+_APPLE_CAMERA_METADATA_RE: Final = re.compile(
+    # Apple QuickTime camera/phone files always carry one or more of:
+    #   - com.apple.* metadata keys (make, model, creationdate, location...)
+    #   - iTunes-style ©-prefixed atoms (©cpy / ©nam / ©ART / ©day / ©alb / ©cmt / ©too)
+    #     The "©" byte decodes from 0xa9 in latin-1, so we match either form.
+    #   - "mdta" or "mdir" metadata-namespace markers
+    r"com\.apple\.|com\.android\.|mdir|mdta|geID|\xa9cpy|\xa9nam|\xa9ART|\xa9day|\xa9alb|\xa9cmt|\xa9too|\xa9wrt|\xa9enc|\xa9gen|\xa9grp",
+    re.IGNORECASE,
+)
+
+
+def _add_video_pipeline_findings(analysis: MediaAnalysis) -> None:
+    """Compose structural ISO BMFF signals into stronger AI-video findings.
+
+    Individual signals (FFmpeg writer, silent video, QuickTime brand on
+    a non-Apple encoder) are each weak. Their *combination* is a much
+    better discriminator: real camera and phone .mov / .mp4 files almost
+    never carry an FFmpeg writer atom AND lack an audio track AND
+    declare the QuickTime brand AND lack Apple-style capture metadata
+    at the same time.
+    """
+    if analysis.kind != MediaKind.VIDEO:
+        return
+
+    has_ffmpeg = any("FFmpeg" in name or "libavformat" in name for name in analysis.tool_fingerprints)
+    has_software_encoder = any(
+        "x264" in name or "x265" in name for name in analysis.tool_fingerprints
+    )
+    silent_video = analysis.video_track_count >= 1 and analysis.audio_track_count == 0
+    has_capture_metadata = bool(_APPLE_CAMERA_METADATA_RE.search(analysis.decoded_text_sample))
+
+    # Strongest combined finding: silent + FFmpeg + no camera metadata.
+    # This is the canonical Sora / Runway / Luma / Pika export shape: a
+    # silent video re-encoded by libavformat without any of the Apple or
+    # Android capture markers a real phone / camera file would carry.
+    if silent_video and has_ffmpeg and not has_capture_metadata:
+        analysis.findings.append(
+            MediaFinding(
+                marker="AI-video pipeline shape (silent + FFmpeg + no capture metadata)",
+                confidence="high",
+                detail=(
+                    "Video has no audio track, was written by libavformat (Lavf), "
+                    "and carries none of the Apple- or Android-style capture "
+                    "metadata atoms a real phone or camera file would include. "
+                    "This is the canonical export shape of AI video generators "
+                    "such as OpenAI Sora, Runway, Luma Dream Machine, and Pika."
+                ),
+            )
+        )
+    elif silent_video and has_ffmpeg:
+        # Silent + FFmpeg but capture metadata present — could be a phone
+        # video that was re-edited through ffmpeg. Keep it medium.
+        analysis.findings.append(
+            MediaFinding(
+                marker="Silent video processed by an FFmpeg pipeline",
+                confidence="medium",
+                detail=(
+                    "Video has no audio track and was written by libavformat. "
+                    "Common pattern for AI-generated video exports."
+                ),
+            )
+        )
+    elif has_ffmpeg and not has_capture_metadata and analysis.kind == MediaKind.VIDEO:
+        # FFmpeg-written video that's missing capture metadata, but with
+        # audio. Probably re-encoded or AI-with-soundtrack — medium tell.
+        analysis.findings.append(
+            MediaFinding(
+                marker="FFmpeg-written video with no camera/phone capture metadata",
+                confidence="medium",
+                detail=(
+                    "Video was written by libavformat without any Apple- or "
+                    "Android-style capture metadata. The file did not come "
+                    "directly off a phone or dedicated camera."
+                ),
+            )
+        )
+
+    # QuickTime brand declared from a non-Apple encoder is a soft tell.
+    if analysis.ftyp_brand == "qt" and has_ffmpeg and not has_capture_metadata:
+        analysis.findings.append(
+            MediaFinding(
+                marker="QuickTime container produced by FFmpeg",
+                confidence="low",
+                detail=(
+                    "ftyp brand is QuickTime ('qt  ') but the writer atom is "
+                    "libavformat and no Apple metadata atoms are present. "
+                    "Phones and Apple software that produce 'qt  ' .mov files "
+                    "always write com.apple.quicktime.* keys."
+                ),
+            )
+        )
+
+    if silent_video and has_software_encoder and not has_ffmpeg:
+        analysis.findings.append(
+            MediaFinding(
+                marker="Silent video encoded by software-only codec",
+                confidence="low",
+                detail=(
+                    "Video lacks an audio track and was produced by a software "
+                    "codec (x264/x265). Phones and cameras almost always use "
+                    "hardware encoders and capture audio simultaneously."
+                ),
+            )
+        )
+
+    # Honest structural finding: every silent video carries this signal,
+    # regardless of writer. We grade it on the FFmpeg context — silent +
+    # FFmpeg is a much stronger combined tell than silent alone.
+    if silent_video:
+        analysis.findings.append(
+            MediaFinding(
+                marker="Video container has no audio track",
+                confidence="medium" if has_ffmpeg else "low",
+                detail=(
+                    "Most consumer cameras, phones, and screen recorders capture "
+                    "audio alongside video. AI video generators (Sora, Runway, "
+                    "Luma, Pika) typically produce silent video."
+                ),
+            )
         )
 
 
