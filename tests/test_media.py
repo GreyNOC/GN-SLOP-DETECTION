@@ -155,6 +155,92 @@ def test_mp4_uuid_box_marks_c2pa_and_fingerprints_runway():
     assert any("Runway" in name for name in analysis.tool_fingerprints)
 
 
+def synth_sora_shaped_mov() -> bytes:
+    """A QuickTime .mov with the canonical Sora export shape:
+
+    - ftyp brand 'qt  '
+    - one video track (hdlr handler_type 'vide'), no audio track
+    - udta with a single \xa9swr (writer) atom whose payload is 'Lavf<x.y.z>'
+    - no Apple capture metadata atoms
+    """
+    # ftyp: 'qt  ' major brand, no compatible brands
+    ftyp_payload = b"qt  " + (0).to_bytes(4, "big") + b"qt  "
+    ftyp = _iso_box(b"ftyp", ftyp_payload)
+
+    # hdlr inside mdia: handler_type 'vide'
+    hdlr_payload = b"\x00\x00\x00\x00" + b"\x00\x00\x00\x00" + b"vide" + (b"\x00" * 12) + b"VideoHandler\x00"
+    hdlr = _iso_box(b"hdlr", hdlr_payload)
+    mdia = _iso_box(b"mdia", hdlr)
+    trak = _iso_box(b"trak", mdia)
+
+    # udta with \xa9swr writer atom — locale prefix then 'Lavf61.7.100'.
+    swr_inner = b"\x00\x0c\x55\xc4" + b"Lavf61.7.100"
+    swr = _iso_box(b"\xa9swr", swr_inner)
+    udta = _iso_box(b"udta", swr)
+
+    moov = _iso_box(b"moov", trak + udta)
+    mdat = _iso_box(b"mdat", b"\x00" * 128)
+    return ftyp + moov + mdat
+
+
+def test_sora_shaped_mov_is_flagged_high_risk():
+    """The exact shape of a ChatGPT/Sora .mov export should land at high risk."""
+    data = synth_sora_shaped_mov()
+    analysis = analyze_media(data)
+    assert analysis.format == MediaFormat.MOV
+    assert analysis.kind == MediaKind.VIDEO
+    assert analysis.ftyp_brand == "qt"
+    assert analysis.video_track_count == 1
+    assert analysis.audio_track_count == 0
+    assert any("FFmpeg" in name for name in analysis.tool_fingerprints)
+    assert any("AI-video pipeline shape" in finding.marker for finding in analysis.findings)
+    assert any(
+        "no audio track" in finding.marker.lower() for finding in analysis.findings
+    )
+    assert analysis.score >= 0.60
+    assert analysis.risk == "high"
+
+
+def test_camera_style_mov_with_lavf_does_not_escalate_to_high():
+    """A re-encoded but otherwise camera-shaped .mov should NOT trigger the
+    composite AI-video-pipeline finding."""
+    ftyp_payload = b"qt  " + (0).to_bytes(4, "big") + b"qt  "
+    ftyp = _iso_box(b"ftyp", ftyp_payload)
+
+    # Two tracks: video and audio.
+    vide_hdlr = _iso_box(
+        b"hdlr",
+        b"\x00\x00\x00\x00" + b"\x00\x00\x00\x00" + b"vide" + (b"\x00" * 12) + b"VideoHandler\x00",
+    )
+    soun_hdlr = _iso_box(
+        b"hdlr",
+        b"\x00\x00\x00\x00" + b"\x00\x00\x00\x00" + b"soun" + (b"\x00" * 12) + b"SoundHandler\x00",
+    )
+    vide_trak = _iso_box(b"trak", _iso_box(b"mdia", vide_hdlr))
+    soun_trak = _iso_box(b"trak", _iso_box(b"mdia", soun_hdlr))
+
+    # udta with both writer atom AND Apple-style ©day / com.apple.* metadata.
+    swr_inner = b"\x00\x0c\x55\xc4" + b"Lavf61.7.100"
+    swr = _iso_box(b"\xa9swr", swr_inner)
+    apple_meta = _iso_box(b"meta", b"com.apple.quicktime.make: Apple\x00")
+    udta = _iso_box(b"udta", swr + apple_meta)
+
+    moov = _iso_box(b"moov", vide_trak + soun_trak + udta)
+    mdat = _iso_box(b"mdat", b"\x00" * 128)
+    data = ftyp + moov + mdat
+
+    analysis = analyze_media(data)
+    assert analysis.video_track_count == 1
+    assert analysis.audio_track_count == 1
+    # FFmpeg fingerprint may still fire (it's a real signal), but the
+    # high-confidence composite finding must NOT fire because capture
+    # metadata is present and audio track exists.
+    assert not any(
+        "AI-video pipeline shape" in finding.marker for finding in analysis.findings
+    )
+    assert analysis.risk != "high"
+
+
 def test_analyze_media_handles_empty_and_unknown_input():
     empty = analyze_media(b"")
     assert empty.format == MediaFormat.UNKNOWN
