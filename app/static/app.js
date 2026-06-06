@@ -168,22 +168,33 @@ function renderDimensions(dimensions = []) {
     return;
   }
 
+  // We avoid `style="width:…"` in the inline HTML on purpose: the dashboard
+  // CSP intentionally drops `'unsafe-inline'` from style-src, so any
+  // parser-inserted inline style attribute is silently discarded and the
+  // bars never fill. JS-set `.style.width` goes through the CSSOM and is
+  // not subject to the inline-style CSP restriction.
   dimensionGrid.innerHTML = dimensions
     .map(
-      (dimension) => `
+      (dimension, index) => `
         <article class="dimension-card ${escapeHtml(dimension.status)}">
           <div>
             <span>${escapeHtml(dimension.name)}</span>
             <strong>${formatPercent(dimension.score)}</strong>
           </div>
           <div class="dimension-track" aria-hidden="true">
-            <div style="width: ${formatPercent(dimension.score)}"></div>
+            <div data-dimension-fill="${index}"></div>
           </div>
           <small>${escapeHtml(dimension.status)}</small>
         </article>
       `,
     )
     .join("");
+  dimensions.forEach((dimension, index) => {
+    const fill = dimensionGrid.querySelector(`[data-dimension-fill="${index}"]`);
+    if (fill) {
+      fill.style.width = formatPercent(dimension.score);
+    }
+  });
 }
 
 function renderProfile(profile) {
