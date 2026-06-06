@@ -23,6 +23,20 @@ jobs:
           node-version: "22"
           cache: npm
 
+      - name: Sync package version to tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          if ($version -notmatch "^[0-9]+\.[0-9]+\.[0-9]+(?:[-+].+)?$") {
+            throw "Tag '$tag' is not a valid semver release."
+          }
+          # The packaging script reads artifact names that include
+          # ${version} from package.json. Force them to match the tag so a
+          # forgotten manual bump never bricks the release.
+          npm version $version --no-git-tag-version --allow-same-version
+          Write-Host "package.json version pinned to $version"
+
       - name: Install Python dependencies
         run: python -m pip install -r requirements-dev.txt -r requirements-build.txt
 
