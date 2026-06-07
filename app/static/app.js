@@ -540,6 +540,11 @@ async function runCodeScan() {
     if (!response.ok) {
       throw new Error(payload.detail || `Scan failed with ${response.status}`);
     }
+    // Stash the scope the user actually scanned with so subsequent
+    // exports (notably SARIF, which re-posts to the backend) reuse the
+    // same include/exclude globs and don't quietly leak excluded files.
+    payload._scan_include_globs = includeGlobs;
+    payload._scan_exclude_globs = excludeGlobs;
     renderCodeResult(payload);
     setState("Complete");
   } catch (error) {
@@ -1013,12 +1018,18 @@ async function downloadSarifPayload() {
     return;
   }
   try {
+    // Reuse the include/exclude globs from the original scan so the
+    // SARIF result matches what the dashboard already shows. Without
+    // this, the backend would do a fresh unscoped scan and return
+    // findings for files the user explicitly excluded.
     const response = await fetch("/api/v1/scan-code/sarif", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         target: lastCodePayload.target,
         target_type: targetType,
+        include_globs: lastCodePayload._scan_include_globs || [],
+        exclude_globs: lastCodePayload._scan_exclude_globs || [],
       }),
     });
     if (!response.ok) {

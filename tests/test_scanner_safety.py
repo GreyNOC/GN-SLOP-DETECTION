@@ -167,6 +167,46 @@ def test_redaction_helper_handles_pem_block() -> None:
 # ---------- LLM verification wiring ---------------------------------------
 
 
+def test_llm_scan_all_files_honors_single_file_target(tmp_path: Path, monkeypatch) -> None:
+    """A single-file PATH target with whole-file LLM mode must not ship siblings to the LLM.
+
+    Codex P1 review: previously ``_apply_llm`` re-resolved the source via
+    ``LocalPathSource(result.target).root`` and re-walked the *parent*
+    directory with the original empty include_globs, defeating the
+    single-file privacy/cost fix.
+    """
+    _write(tmp_path, "safe.py", "eval(payload)\n")
+    _write(tmp_path, "secret.py", "eval(secret_payload)\n")
+
+    from app.api import routes as routes_module
+
+    sent_paths: list[str] = []
+
+    def fake_scan_whole_file(config, path, code):  # noqa: ARG001
+        sent_paths.append(path)
+        return []
+
+    monkeypatch.setattr(routes_module, "scan_whole_file", fake_scan_whole_file)
+
+    response = client.post(
+        "/api/v1/scan-code",
+        json={
+            "target": str(tmp_path / "safe.py"),
+            "target_type": "path",
+            "llm": {
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "api_key": "fake-key",
+                "mode": "scan_all_files",
+            },
+        },
+    )
+    assert response.status_code == 200
+    # Only the targeted file should have been sent to the LLM.
+    assert sent_paths == ["safe.py"]
+    assert "secret.py" not in sent_paths
+
+
 def test_llm_verification_serializes_into_response(tmp_path: Path, monkeypatch) -> None:
     _write(tmp_path, "src/x.py", "eval(payload)\n")
 

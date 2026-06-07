@@ -283,16 +283,25 @@ def _apply_llm(result: ScanResult, llm_payload, request: ScanRequest) -> None:
     # because that's the path that burns user API spend.
     if llm_payload.mode == "scan_all_files":
         try:
-            root = LocalPathSource(result.target).root
+            # Re-resolve via LocalPathSource so a single-file target
+            # narrows the LLM pass to that one file the same way the
+            # static scan does. Without this, scan_all_files on a
+            # single-file PATH target would re-walk the parent dir and
+            # ship every sibling to the external provider.
+            llm_source = LocalPathSource(request.target)
+            root = llm_source.root
         except Exception:
             return
+        include_globs = tuple(request.include_globs)
+        if llm_source.single_file_relative:
+            include_globs = (llm_source.single_file_relative,)
         files, _stats = walk_collect(
             root,
             max_bytes_per_file=request.max_bytes_per_file,
             max_total_bytes=request.max_total_bytes,
             max_files=request.max_files,
-            include_globs=request.include_globs,
-            exclude_globs=request.exclude_globs,
+            include_globs=include_globs,
+            exclude_globs=tuple(request.exclude_globs),
         )
         for walked in files:
             entries = scan_whole_file(config, walked.relative_path, walked.text)
