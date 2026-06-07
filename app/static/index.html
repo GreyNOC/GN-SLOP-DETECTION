@@ -145,13 +145,17 @@
 
             <div id="mediaField" hidden>
               <label class="field-label" for="mediaInput">Media file</label>
-              <input
-                class="source-input"
-                id="mediaInput"
-                name="media"
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif,image/heic,image/heif,image/avif,video/mp4,video/quicktime,video/webm"
-              />
+              <div class="file-picker">
+                <input
+                  class="visually-hidden"
+                  id="mediaInput"
+                  name="media"
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif,image/heic,image/heif,image/avif,video/mp4,video/quicktime,video/webm"
+                />
+                <label class="file-picker-button" for="mediaInput">Browse files…</label>
+                <span class="file-picker-name" id="mediaInputName">No file chosen</span>
+              </div>
               <p class="field-hint">PNG, JPEG, WebP, HEIC, MP4, MOV, WebM. Scanned locally for C2PA, JUMBF, SynthID, and 13+ generator fingerprints.</p>
             </div>
 
@@ -176,12 +180,16 @@
 
               <div id="codeTargetArchiveWrap" hidden>
                 <label class="field-label" for="codeArchiveInput">Archive</label>
-                <input
-                  class="source-input"
-                  id="codeArchiveInput"
-                  type="file"
-                  accept=".zip,.tar,.tgz,.gz,.bz2,.xz"
-                />
+                <div class="file-picker">
+                  <input
+                    class="visually-hidden"
+                    id="codeArchiveInput"
+                    type="file"
+                    accept=".zip,.tar,.tgz,.gz,.bz2,.xz"
+                  />
+                  <label class="file-picker-button" for="codeArchiveInput">Browse archive…</label>
+                  <span class="file-picker-name" id="codeArchiveInputName">No archive chosen</span>
+                </div>
               </div>
 
               <label class="field-label" for="codeExcludeInput">Exclude (comma-separated globs, optional)</label>

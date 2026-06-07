@@ -16,6 +16,8 @@ const codeTargetInput = document.querySelector("#codeTargetInput");
 const codeTargetTextWrap = document.querySelector("#codeTargetTextWrap");
 const codeTargetArchiveWrap = document.querySelector("#codeTargetArchiveWrap");
 const codeArchiveInput = document.querySelector("#codeArchiveInput");
+const codeArchiveInputName = document.querySelector("#codeArchiveInputName");
+const mediaInputName = document.querySelector("#mediaInputName");
 const codeExcludeInput = document.querySelector("#codeExcludeInput");
 const codeLlmMode = document.querySelector("#codeLlmMode");
 const codeLlmProvider = document.querySelector("#codeLlmProvider");
@@ -903,7 +905,13 @@ if (codeModeButton) {
 textInput.addEventListener("input", updateCounter);
 urlInput.addEventListener("input", updateCounter);
 if (mediaInput) {
-  mediaInput.addEventListener("change", updateCounter);
+  mediaInput.addEventListener("change", () => {
+    if (mediaInputName) {
+      const file = mediaInput.files?.[0];
+      mediaInputName.textContent = file ? file.name : "No file chosen";
+    }
+    updateCounter();
+  });
 }
 if (codeTargetTypeSelect) {
   codeTargetTypeSelect.addEventListener("change", () => {
@@ -917,7 +925,13 @@ if (codeTargetInput) {
   codeTargetInput.addEventListener("input", updateCounter);
 }
 if (codeArchiveInput) {
-  codeArchiveInput.addEventListener("change", updateCounter);
+  codeArchiveInput.addEventListener("change", () => {
+    if (codeArchiveInputName) {
+      const file = codeArchiveInput.files?.[0];
+      codeArchiveInputName.textContent = file ? file.name : "No archive chosen";
+    }
+    updateCounter();
+  });
 }
 if (expandAllButton) {
   expandAllButton.addEventListener("click", () => {
