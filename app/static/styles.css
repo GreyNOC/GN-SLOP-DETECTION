@@ -160,6 +160,104 @@ button.nav-item {
   font-size: 0.82rem;
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.finding-row {
+  cursor: pointer;
+}
+
+.finding-row.expandable td:first-child::before {
+  content: "▸ ";
+  color: var(--muted);
+  font-size: 0.8em;
+  margin-right: 2px;
+}
+
+.finding-row.expanded td:first-child::before {
+  content: "▾ ";
+}
+
+.finding-detail-row > td {
+  background: var(--surface-soft);
+  border-top: 1px solid var(--line);
+  padding: 14px 18px;
+}
+
+.finding-detail {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  color: var(--muted-strong);
+}
+
+.finding-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.finding-detail-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.finding-detail-snippet {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  background: var(--ink);
+  border: 1px solid var(--line);
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  overflow-x: auto;
+}
+
+.finding-detail-remediation {
+  font-size: 0.92rem;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.finding-severity-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 2px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(120, 130, 145, 0.18);
+  color: var(--muted-strong);
+}
+
+.finding-severity-pill.critical {
+  background: rgba(255, 93, 93, 0.18);
+  color: var(--red);
+}
+
+.finding-severity-pill.high {
+  background: rgba(240, 180, 41, 0.18);
+  color: var(--amber);
+}
+
+.finding-severity-pill.medium {
+  background: rgba(75, 163, 255, 0.18);
+  color: var(--blue);
+}
+
+.finding-severity-pill.low,
+.finding-severity-pill.info {
+  background: rgba(25, 195, 125, 0.16);
+  color: var(--green);
+}
+
 .status-dot {
   width: 9px;
   height: 9px;

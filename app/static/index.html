@@ -294,11 +294,30 @@
               <p class="eyebrow">Evidence</p>
               <h2>Detected Signals</h2>
             </div>
+            <div class="panel-actions" id="findingsActions" hidden>
+              <button
+                class="icon-button"
+                id="expandAllButton"
+                type="button"
+                aria-pressed="false"
+                title="Expand every finding to show its probe + suggested fix inline."
+              >
+                Expand all
+              </button>
+              <button
+                class="primary-button"
+                id="downloadReportButton"
+                type="button"
+                title="Download a self-contained HTML report including every finding, its probe (offending code snippet), and its suggested fix."
+              >
+                Download Full Report
+              </button>
+            </div>
           </div>
 
           <div class="table-wrap">
             <table>
-              <thead>
+              <thead id="signalsTableHead">
                 <tr>
                   <th>Signal</th>
                   <th>Category</th>
