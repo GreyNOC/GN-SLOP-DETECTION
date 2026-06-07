@@ -1,6 +1,6 @@
 {
   "name": "gn-slop-detection-desktop",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "GreyNOC Slop Detection desktop app",
   "main": "electron/main.js",
   "private": true,

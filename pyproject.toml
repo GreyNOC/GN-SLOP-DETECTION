@@ -1,10 +1,11 @@
 [project]
 name = "gn-slop-detection"
-version = "0.3.2"
+version = "0.3.3"
 description = "GreyNOC slop detection API and CLI"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi==0.115.6",
+  "starlette>=0.41,<0.42",
   "uvicorn[standard]==0.34.0",
   "pydantic==2.10.4",
   "python-dotenv==1.0.1",
