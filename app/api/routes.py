@@ -1,7 +1,23 @@
+import tempfile
+from collections import Counter
 from dataclasses import asdict
+from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 
+from app.core.code_scanner import (
+    Confidence,
+    ScanRequest,
+    ScanResult,
+    ScanTargetType,
+    scan_target,
+)
+from app.core.code_scanner.llm import LlmConfig, scan_whole_file, verify_finding
+from app.core.code_scanner.model import Finding, Severity
+from app.core.code_scanner.sarif import to_sarif
+from app.core.code_scanner.sources import LocalPathSource
+from app.core.code_scanner.walker import walk_collect
 from app.core.detector import SlopDetector
 from app.core.media_detector import analyze_media
 from app.core.settings import get_settings
@@ -14,6 +30,9 @@ from app.models.schemas import (
     AnalyzeUrlRequest,
     BatchAnalyzeRequest,
     BatchAnalyzeResponse,
+    CodeFindingResponse,
+    CodeScanRequest,
+    CodeScanResponse,
     ContentProfile,
     Dimension,
     MediaAnalysisResponse,
@@ -89,9 +108,6 @@ async def analyze_media_upload(
     if source is not None and len(source) > MAX_SOURCE_LENGTH:
         raise HTTPException(status_code=422, detail="source label is too long.")
 
-    # Read one byte past the configured cap so we can distinguish "exactly
-    # at the limit" from "exceeds the limit" without holding two copies in
-    # memory. UploadFile is a SpooledTemporaryFile so this is safe.
     cap = settings.media_max_bytes
     if cap <= 0:
         raise HTTPException(status_code=500, detail="Media analysis cap is misconfigured.")
@@ -127,6 +143,197 @@ async def analyze_media_upload(
         findings=[MediaFinding(**asdict(finding)) for finding in analysis.findings],
         recommendation=analysis.recommendation,
     )
+
+
+def _finding_to_response(finding: Finding) -> CodeFindingResponse:
+    return CodeFindingResponse(
+        rule_id=finding.rule_id,
+        title=finding.title,
+        description=finding.description,
+        severity=finding.severity.value,
+        confidence=finding.confidence.value,
+        category=finding.category,
+        file_path=finding.file_path,
+        line_start=finding.line_start,
+        line_end=finding.line_end,
+        snippet=finding.snippet,
+        remediation=finding.remediation,
+    )
+
+
+def _scan_result_to_response(result: ScanResult) -> CodeScanResponse:
+    counts: Counter[str] = Counter()
+    for finding in result.findings:
+        counts[finding.severity.value] += 1
+    return CodeScanResponse(
+        target=result.target,
+        target_type=result.target_type.value,
+        algorithm=result.algorithm,
+        files_scanned=result.files_scanned,
+        files_skipped=result.files_skipped,
+        bytes_scanned=result.bytes_scanned,
+        elapsed_seconds=result.elapsed_seconds,
+        findings=[_finding_to_response(f) for f in result.findings],
+        skipped_examples=list(result.skipped_examples),
+        git_metadata=dict(result.git_metadata),
+        score=result.score,
+        risk=result.risk,
+        recommendation=result.recommendation,
+        finding_counts={severity: counts.get(severity, 0) for severity in (s.value for s in Severity)},
+    )
+
+
+def _build_scan_request(req: CodeScanRequest) -> ScanRequest:
+    try:
+        target_type = ScanTargetType(req.target_type)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=f"Unknown target_type: {req.target_type}") from error
+    return ScanRequest(
+        target=req.target,
+        target_type=target_type,
+        include_globs=tuple(req.include_globs),
+        exclude_globs=tuple(req.exclude_globs),
+    )
+
+
+def _apply_llm(result: ScanResult, llm_payload, request: ScanRequest) -> None:
+    if llm_payload is None or llm_payload.mode == "off":
+        return
+    if llm_payload.provider not in {"openai", "anthropic"}:
+        return
+    if not llm_payload.api_key:
+        return
+    config = LlmConfig(
+        provider=llm_payload.provider,
+        model=llm_payload.model,
+        api_key=llm_payload.api_key,
+        base_url=llm_payload.base_url or "",
+    )
+
+    # Per-finding verification: ask the LLM to second-guess each finding.
+    # We only send the snippet stored on the finding itself (already
+    # bounded), so users don't accidentally ship a whole file at the
+    # bandwidth cost of a one-line match.
+    if llm_payload.mode == "verify_findings":
+        for finding in result.findings:
+            verification = verify_finding(config, finding, finding.snippet)
+            key = f"{finding.rule_id}@{finding.file_path}:{finding.line_start}"
+            result.llm_verifications[key] = verification
+
+    # Whole-file scan: re-walk just the files that look interesting
+    # (have at least one static finding) plus any path the include
+    # globs explicitly targeted. We don't blanket every file by default
+    # because that's the path that burns user API spend.
+    if llm_payload.mode == "scan_all_files":
+        try:
+            root = LocalPathSource(result.target).root
+        except Exception:
+            return
+        files, _stats = walk_collect(
+            root,
+            max_bytes_per_file=request.max_bytes_per_file,
+            max_total_bytes=request.max_total_bytes,
+            max_files=request.max_files,
+            include_globs=request.include_globs,
+            exclude_globs=request.exclude_globs,
+        )
+        for walked in files:
+            entries = scan_whole_file(config, walked.relative_path, walked.text)
+            file_lines = walked.text.splitlines()
+            for entry in entries:
+                severity_value = entry.get("severity", "medium")
+                try:
+                    severity = Severity(severity_value)
+                except ValueError:
+                    severity = Severity.MEDIUM
+                target_line = max(1, int(entry.get("line", 1)))
+                window_start = max(0, target_line - 2)
+                window_end = min(len(file_lines), target_line + 1)
+                snippet = " | ".join(file_lines[window_start:window_end])[:240]
+                result.findings.append(
+                    Finding(
+                        rule_id="llm.scan",
+                        title=entry.get("title", "LLM finding"),
+                        description=entry.get("rationale", ""),
+                        severity=severity,
+                        confidence=Confidence.LOW,
+                        category="llm",
+                        file_path=walked.relative_path,
+                        line_start=target_line,
+                        line_end=target_line,
+                        snippet=snippet,
+                        remediation="LLM finding — verify manually before acting.",
+                    )
+                )
+        # Recompute the composite score with the new findings in.
+        result.compute_score()
+
+
+@router.post("/scan-code", response_model=CodeScanResponse)
+def scan_code(request: CodeScanRequest) -> CodeScanResponse:
+    scan_request = _build_scan_request(request)
+    try:
+        result = scan_target(scan_request)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (ValueError, NotADirectoryError, RuntimeError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    _apply_llm(result, request.llm, scan_request)
+    return _scan_result_to_response(result)
+
+
+@router.post("/scan-code/upload", response_model=CodeScanResponse)
+async def scan_code_upload(
+    file: UploadFile = File(  # noqa: B008
+        ..., description="Archive (.zip / .tar.gz / .tgz) of a code tree to scan."
+    ),
+    include_globs: str | None = Form(default=None),  # noqa: B008
+    exclude_globs: str | None = Form(default=None),  # noqa: B008
+) -> CodeScanResponse:
+    suffix = (file.filename or "").lower()
+    if not any(suffix.endswith(ext) for ext in (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz")):
+        raise HTTPException(
+            status_code=422,
+            detail="Upload must be a .zip / .tar / .tar.gz / .tgz / .tar.bz2 / .tar.xz archive.",
+        )
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(suffix).suffix) as tmp:
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=422, detail="Uploaded archive is empty.")
+        tmp.write(data)
+        tmp_path = tmp.name
+
+    scan_request = ScanRequest(
+        target=tmp_path,
+        target_type=ScanTargetType.ARCHIVE,
+        include_globs=tuple(include_globs.split(",")) if include_globs else (),
+        exclude_globs=tuple(exclude_globs.split(",")) if exclude_globs else (),
+    )
+    try:
+        result = scan_target(scan_request)
+    except (FileNotFoundError, ValueError, RuntimeError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    finally:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    result.target = file.filename or "archive"
+    return _scan_result_to_response(result)
+
+
+@router.post("/scan-code/sarif")
+def scan_code_sarif(request: CodeScanRequest) -> JSONResponse:
+    scan_request = _build_scan_request(request)
+    try:
+        result = scan_target(scan_request)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (ValueError, NotADirectoryError, RuntimeError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return JSONResponse(content=to_sarif(result))
 
 
 @router.get("/threshold")

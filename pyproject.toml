@@ -1,6 +1,6 @@
 [project]
 name = "gn-slop-detection"
-version = "0.3.3"
+version = "0.4.0"
 description = "GreyNOC slop detection API and CLI"
 requires-python = ">=3.11"
 dependencies = [
@@ -37,3 +37,9 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Rule definitions are intentionally long: each entry holds a
+# description / remediation string in-line for readability over a
+# wrapped one. Same for the bundled known-bad version list.
+"app/core/code_scanner/rules/*.py" = ["E501"]

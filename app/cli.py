@@ -7,6 +7,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from app.core.code_scanner import ScanRequest, ScanTargetType, scan_target
+from app.core.code_scanner.model import ScanResult
+from app.core.code_scanner.sarif import to_sarif
 from app.core.detector import DetectionResult, SlopDetector
 from app.core.media_detector import MediaAnalysis, analyze_media
 from app.core.web_ingest import FetchedWebsite, WebsiteFetchError, fetch_website_text
@@ -194,6 +197,86 @@ def analyze_media_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scan_result_to_payload(result: ScanResult) -> dict[str, Any]:
+    return {
+        "target": result.target,
+        "target_type": result.target_type.value,
+        "algorithm": result.algorithm,
+        "files_scanned": result.files_scanned,
+        "files_skipped": result.files_skipped,
+        "bytes_scanned": result.bytes_scanned,
+        "elapsed_seconds": result.elapsed_seconds,
+        "score": result.score,
+        "risk": result.risk,
+        "recommendation": result.recommendation,
+        "git_metadata": dict(result.git_metadata),
+        "findings": [
+            {
+                "rule_id": finding.rule_id,
+                "title": finding.title,
+                "description": finding.description,
+                "severity": finding.severity.value,
+                "confidence": finding.confidence.value,
+                "category": finding.category,
+                "file_path": finding.file_path,
+                "line_start": finding.line_start,
+                "line_end": finding.line_end,
+                "snippet": finding.snippet,
+                "remediation": finding.remediation,
+            }
+            for finding in result.findings
+        ],
+        "skipped_examples": list(result.skipped_examples),
+    }
+
+
+def scan_code_command(args: argparse.Namespace) -> int:
+    target = args.target
+    target_type = ScanTargetType(args.type)
+    request = ScanRequest(
+        target=target,
+        target_type=target_type,
+        include_globs=tuple(args.include or ()),
+        exclude_globs=tuple(args.exclude or ()),
+    )
+    try:
+        result = scan_target(request)
+    except FileNotFoundError as error:
+        print(json.dumps({"error": str(error)}), file=sys.stderr)
+        return 1
+    except (ValueError, NotADirectoryError, RuntimeError) as error:
+        print(json.dumps({"error": str(error)}), file=sys.stderr)
+        return 1
+
+    if args.sarif:
+        print(json.dumps(to_sarif(result), indent=2 if args.pretty else None))
+        return 0
+
+    payload = _scan_result_to_payload(result)
+    if args.json:
+        print_json(payload, args.pretty)
+        return 0
+
+    print(f"GreyNOC Code Scan: {result.target}")
+    print(
+        f"Files: {result.files_scanned}  Skipped: {result.files_skipped}  "
+        f"Bytes: {result.bytes_scanned}  Time: {result.elapsed_seconds:.2f}s"
+    )
+    print(f"Risk: {result.risk.upper()}  Score: {result.score:.3f}")
+    if result.findings:
+        print("Findings:")
+        for finding in result.findings[:25]:
+            location = f"{finding.file_path}:{finding.line_start}"
+            print(
+                f"  [{finding.severity.value:>8}/{finding.confidence.value:>6}] "
+                f"{finding.rule_id} — {finding.title}  ({location})"
+            )
+        if len(result.findings) > 25:
+            print(f"  ... {len(result.findings) - 25} more")
+    print(f"Recommendation: {result.recommendation}")
+    return 0
+
+
 def analyze_url(args: argparse.Namespace) -> int:
     try:
         payload = analyze_website_target(args.url, args.source)
@@ -299,6 +382,42 @@ def build_parser() -> argparse.ArgumentParser:
     media_parser.add_argument("--source", help="Optional source label.")
     media_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     media_parser.set_defaults(handler=analyze_media_command)
+
+    scan_parser = subparsers.add_parser(
+        "scan", help="Scan a code tree for backdoors, secrets, and exploit primitives."
+    )
+    scan_parser.add_argument(
+        "target",
+        help=(
+            "Path to a directory (default), path to a git checkout (--type git_local), "
+            "URL to a public git repo (--type git_remote), or path to a .zip / .tar.gz "
+            "archive (--type archive)."
+        ),
+    )
+    scan_parser.add_argument(
+        "--type",
+        choices=[t.value for t in ScanTargetType],
+        default=ScanTargetType.PATH.value,
+        help="Scan source type. Defaults to path.",
+    )
+    scan_parser.add_argument(
+        "--include",
+        action="append",
+        help="fnmatch include pattern. May be supplied more than once.",
+    )
+    scan_parser.add_argument(
+        "--exclude",
+        action="append",
+        help="fnmatch exclude pattern. May be supplied more than once.",
+    )
+    scan_parser.add_argument(
+        "--json", action="store_true", help="Output the full JSON payload."
+    )
+    scan_parser.add_argument(
+        "--sarif", action="store_true", help="Output SARIF v2.1.0 instead of the JSON payload."
+    )
+    scan_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    scan_parser.set_defaults(handler=scan_code_command)
 
     return parser
 

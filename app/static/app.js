@@ -6,9 +6,21 @@ const mediaInput = document.querySelector("#mediaInput");
 const textField = document.querySelector("#textField");
 const urlField = document.querySelector("#urlField");
 const mediaField = document.querySelector("#mediaField");
+const codeField = document.querySelector("#codeField");
 const textModeButton = document.querySelector("#textModeButton");
 const urlModeButton = document.querySelector("#urlModeButton");
 const mediaModeButton = document.querySelector("#mediaModeButton");
+const codeModeButton = document.querySelector("#codeModeButton");
+const codeTargetTypeSelect = document.querySelector("#codeTargetTypeSelect");
+const codeTargetInput = document.querySelector("#codeTargetInput");
+const codeTargetTextWrap = document.querySelector("#codeTargetTextWrap");
+const codeTargetArchiveWrap = document.querySelector("#codeTargetArchiveWrap");
+const codeArchiveInput = document.querySelector("#codeArchiveInput");
+const codeExcludeInput = document.querySelector("#codeExcludeInput");
+const codeLlmMode = document.querySelector("#codeLlmMode");
+const codeLlmProvider = document.querySelector("#codeLlmProvider");
+const codeLlmModel = document.querySelector("#codeLlmModel");
+const codeLlmKey = document.querySelector("#codeLlmKey");
 const analyzeButton = document.querySelector("#analyzeButton");
 const sampleButton = document.querySelector("#sampleButton");
 const clearButton = document.querySelector("#clearButton");
@@ -88,10 +100,14 @@ function setMode(mode) {
   const isText = mode === "text";
   const isUrl = mode === "website";
   const isMedia = mode === "media";
+  const isCode = mode === "code";
   textField.hidden = !isText;
   urlField.hidden = !isUrl;
   if (mediaField) {
     mediaField.hidden = !isMedia;
+  }
+  if (codeField) {
+    codeField.hidden = !isCode;
   }
   textInput.required = isText;
   urlInput.required = isUrl;
@@ -103,16 +119,24 @@ function setMode(mode) {
   if (mediaModeButton) {
     mediaModeButton.classList.toggle("active", isMedia);
   }
+  if (codeModeButton) {
+    codeModeButton.classList.toggle("active", isCode);
+  }
   textModeButton.setAttribute("aria-selected", String(isText));
   urlModeButton.setAttribute("aria-selected", String(isUrl));
   if (mediaModeButton) {
     mediaModeButton.setAttribute("aria-selected", String(isMedia));
+  }
+  if (codeModeButton) {
+    codeModeButton.setAttribute("aria-selected", String(isCode));
   }
   updateCounter();
   if (isUrl) {
     urlInput.focus();
   } else if (isMedia && mediaInput) {
     mediaInput.focus();
+  } else if (isCode && codeTargetInput) {
+    codeTargetInput.focus();
   } else {
     textInput.focus();
   }
@@ -130,6 +154,19 @@ function updateCounter() {
       charCounter.textContent = `${kb.toLocaleString()} KB ${file.name}`;
     } else {
       charCounter.textContent = "no file selected";
+    }
+    return;
+  }
+  if (inputMode === "code") {
+    const type = codeTargetTypeSelect?.value || "path";
+    if (type === "archive") {
+      const file = codeArchiveInput?.files?.[0];
+      charCounter.textContent = file
+        ? `${Math.max(1, Math.round(file.size / 1024)).toLocaleString()} KB ${file.name}`
+        : "no archive selected";
+    } else {
+      const target = codeTargetInput?.value || "";
+      charCounter.textContent = target ? `target: ${target.slice(0, 60)}` : "no target";
     }
     return;
   }
@@ -371,6 +408,11 @@ async function analyzeText(event) {
     return;
   }
 
+  if (inputMode === "code") {
+    await runCodeScan();
+    return;
+  }
+
   setState("Analyzing", true);
 
   try {
@@ -410,6 +452,148 @@ async function analyzeText(event) {
     setState("Request failed");
     recommendation.textContent = error.message;
   }
+}
+
+async function runCodeScan() {
+  const type = codeTargetTypeSelect?.value || "path";
+  const archiveFile = codeArchiveInput?.files?.[0] || null;
+  const target = codeTargetInput?.value?.trim() || "";
+
+  if (type !== "archive" && !target) {
+    codeTargetInput?.focus();
+    setState("Target required");
+    return;
+  }
+  if (type === "archive" && !archiveFile) {
+    codeArchiveInput?.focus();
+    setState("Archive required");
+    return;
+  }
+
+  setState("Scanning", true);
+  try {
+    const excludeGlobs = (codeExcludeInput?.value || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    let response;
+    if (type === "archive") {
+      const formData = new FormData();
+      formData.append("file", archiveFile);
+      if (excludeGlobs.length) {
+        formData.append("exclude_globs", excludeGlobs.join(","));
+      }
+      response = await fetch("/api/v1/scan-code/upload", { method: "POST", body: formData });
+    } else {
+      const llm = buildLlmPayload();
+      const body = {
+        target,
+        target_type: type,
+        exclude_globs: excludeGlobs,
+      };
+      if (llm) {
+        body.llm = llm;
+      }
+      response = await fetch("/api/v1/scan-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.detail || `Scan failed with ${response.status}`);
+    }
+    renderCodeResult(payload);
+    setState("Complete");
+  } catch (error) {
+    setState("Request failed");
+    recommendation.textContent = error.message;
+  }
+}
+
+function buildLlmPayload() {
+  const mode = codeLlmMode?.value || "off";
+  if (mode === "off") return null;
+  const provider = codeLlmProvider?.value || "openai";
+  const model = (codeLlmModel?.value || "").trim();
+  const apiKey = (codeLlmKey?.value || "").trim();
+  if (!model || !apiKey) return null;
+  return { mode, provider, model, api_key: apiKey };
+}
+
+function renderCodeResult(payload) {
+  const score = Number(payload.score) || 0;
+  const risk = payload.risk || "neutral";
+  const riskLabel = riskLabels[risk] || "Ready";
+  const scorePercent = Math.round(score * 100);
+  riskMetric.textContent = riskLabel;
+  scoreMetric.textContent = score.toFixed(3);
+  wordMetric.textContent = Number(payload.files_scanned || 0).toLocaleString();
+  signalMetric.textContent = Number((payload.findings || []).length).toLocaleString();
+  riskPill.textContent = riskLabel;
+  setRiskClass(risk);
+  scoreFill.style.width = `${scorePercent}%`;
+  dialScore.textContent = `${scorePercent}%`;
+  recommendation.textContent =
+    payload.recommendation || "Scan complete.";
+
+  if (sourceCard) {
+    sourceCard.hidden = false;
+    sourceKind.textContent = `Code · ${payload.target_type || "path"}`;
+    sourceTitle.textContent = payload.target || "Scan target";
+    sourceUrl.textContent = "";
+    sourceUrl.removeAttribute("href");
+  }
+
+  const findings = payload.findings || [];
+  if (!findings.length) {
+    signalsTable.innerHTML =
+      '<tr><td colspan="5" class="empty-cell">No findings detected at this scan depth.</td></tr>';
+  } else {
+    signalsTable.innerHTML = findings
+      .slice(0, 250)
+      .map(
+        (finding) => `
+          <tr>
+            <td>${escapeHtml(finding.rule_id)}</td>
+            <td>${escapeHtml(finding.severity)}/${escapeHtml(finding.confidence)}</td>
+            <td>${escapeHtml(finding.category)}</td>
+            <td>${escapeHtml(finding.file_path)}:${escapeHtml(String(finding.line_start))}</td>
+            <td>${escapeHtml(finding.title)}</td>
+          </tr>
+        `,
+      )
+      .join("");
+  }
+
+  const counts = payload.finding_counts || {};
+  const flags = [
+    ["Algorithm", payload.algorithm || "code-picture-v1"],
+    ["Files scanned", Number(payload.files_scanned || 0).toLocaleString()],
+    ["Files skipped", Number(payload.files_skipped || 0).toLocaleString()],
+    ["Bytes scanned", Number(payload.bytes_scanned || 0).toLocaleString()],
+    ["Elapsed (s)", (Number(payload.elapsed_seconds) || 0).toFixed(2)],
+    ["Critical", Number(counts.critical || 0).toLocaleString()],
+    ["High", Number(counts.high || 0).toLocaleString()],
+    ["Medium", Number(counts.medium || 0).toLocaleString()],
+    ["Low/Info", (
+      Number(counts.low || 0) + Number(counts.info || 0)
+    ).toLocaleString()],
+  ];
+  profileGrid.innerHTML = flags
+    .map(
+      ([label, value]) => `
+        <div class="profile-item">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(String(value))}</strong>
+        </div>
+      `,
+    )
+    .join("");
+
+  dimensionGrid.innerHTML =
+    '<div class="empty-block">Dimension scores apply to text analysis only.</div>';
 }
 
 function setHealth(state, label) {
@@ -481,10 +665,27 @@ urlModeButton.addEventListener("click", () => setMode("website"));
 if (mediaModeButton) {
   mediaModeButton.addEventListener("click", () => setMode("media"));
 }
+if (codeModeButton) {
+  codeModeButton.addEventListener("click", () => setMode("code"));
+}
 textInput.addEventListener("input", updateCounter);
 urlInput.addEventListener("input", updateCounter);
 if (mediaInput) {
   mediaInput.addEventListener("change", updateCounter);
+}
+if (codeTargetTypeSelect) {
+  codeTargetTypeSelect.addEventListener("change", () => {
+    const isArchive = codeTargetTypeSelect.value === "archive";
+    if (codeTargetTextWrap) codeTargetTextWrap.hidden = isArchive;
+    if (codeTargetArchiveWrap) codeTargetArchiveWrap.hidden = !isArchive;
+    updateCounter();
+  });
+}
+if (codeTargetInput) {
+  codeTargetInput.addEventListener("input", updateCounter);
+}
+if (codeArchiveInput) {
+  codeArchiveInput.addEventListener("change", updateCounter);
 }
 form.addEventListener("submit", analyzeText);
 updateCounter();
