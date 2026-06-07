@@ -104,6 +104,9 @@
               <button class="mode-button" id="mediaModeButton" type="button" role="tab" aria-selected="false">
                 Media
               </button>
+              <button class="mode-button" id="codeModeButton" type="button" role="tab" aria-selected="false">
+                Code
+              </button>
             </div>
 
             <label class="field-label" for="sourceInput">Source</label>
@@ -150,6 +153,72 @@
                 accept="image/png,image/jpeg,image/webp,image/gif,image/heic,image/heif,image/avif,video/mp4,video/quicktime,video/webm"
               />
               <p class="field-hint">PNG, JPEG, WebP, HEIC, MP4, MOV, WebM. Scanned locally for C2PA, JUMBF, SynthID, and 13+ generator fingerprints.</p>
+            </div>
+
+            <div id="codeField" hidden>
+              <label class="field-label" for="codeTargetTypeSelect">Scan type</label>
+              <select class="source-input" id="codeTargetTypeSelect">
+                <option value="path">Local folder path</option>
+                <option value="git_local">Local git checkout</option>
+                <option value="git_remote">Remote git URL</option>
+                <option value="archive">Uploaded archive (.zip / .tar.gz)</option>
+              </select>
+
+              <div id="codeTargetTextWrap">
+                <label class="field-label" for="codeTargetInput">Target</label>
+                <input
+                  class="source-input"
+                  id="codeTargetInput"
+                  type="text"
+                  placeholder="C:\path\to\repo or https://github.com/owner/name"
+                />
+              </div>
+
+              <div id="codeTargetArchiveWrap" hidden>
+                <label class="field-label" for="codeArchiveInput">Archive</label>
+                <input
+                  class="source-input"
+                  id="codeArchiveInput"
+                  type="file"
+                  accept=".zip,.tar,.tgz,.gz,.bz2,.xz"
+                />
+              </div>
+
+              <label class="field-label" for="codeExcludeInput">Exclude (comma-separated globs, optional)</label>
+              <input
+                class="source-input"
+                id="codeExcludeInput"
+                type="text"
+                placeholder="node_modules/*, vendor/*"
+              />
+
+              <details class="code-llm-details">
+                <summary>Bring-your-own LLM (optional, off by default)</summary>
+                <p class="field-hint">
+                  Enable to send static findings (or whole files) to your own API key for a
+                  second-opinion review. Keys are never persisted — they're sent with the request and forgotten.
+                </p>
+                <label class="field-label" for="codeLlmMode">Mode</label>
+                <select class="source-input" id="codeLlmMode">
+                  <option value="off">Off</option>
+                  <option value="verify_findings">Verify static findings only</option>
+                  <option value="scan_all_files">Scan every file end-to-end</option>
+                </select>
+                <label class="field-label" for="codeLlmProvider">Provider</label>
+                <select class="source-input" id="codeLlmProvider">
+                  <option value="openai">OpenAI-compatible</option>
+                  <option value="anthropic">Anthropic Messages</option>
+                </select>
+                <label class="field-label" for="codeLlmModel">Model</label>
+                <input class="source-input" id="codeLlmModel" type="text" placeholder="e.g. gpt-4o-mini or claude-3-5-sonnet-latest" />
+                <label class="field-label" for="codeLlmKey">API key</label>
+                <input class="source-input" id="codeLlmKey" type="password" autocomplete="off" />
+              </details>
+
+              <p class="field-hint">
+                Detects hardcoded secrets, eval/exec sinks, command injection, suspicious network calls, weak crypto, CI workflow exfil, and backdoor heuristics across Python, JS/TS, shell, Go, Java, Rust, and C/C++.
+                <strong>This is a heuristic scanner.</strong> It surfaces patterns associated with backdoors and exploit primitives, not novel zero-days.
+              </p>
             </div>
 
             <div class="form-actions">

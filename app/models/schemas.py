@@ -7,6 +7,7 @@ MAX_SOURCE_LENGTH: Final = 256
 MAX_URL_LENGTH: Final = 2_048
 MAX_BATCH_ITEMS: Final = 25
 MAX_MEDIA_FILENAME_LENGTH: Final = 256
+MAX_SCAN_TARGET_LENGTH: Final = 4_096
 
 
 class AnalyzeRequest(BaseModel):
@@ -118,3 +119,52 @@ class MediaAnalysisResponse(BaseModel):
     tool_fingerprints: list[str]
     findings: list[MediaFinding]
     recommendation: str
+
+
+class LlmCheckConfig(BaseModel):
+    provider: str = Field(..., description="openai or anthropic")
+    model: str
+    api_key: str
+    base_url: str | None = None
+    mode: str = Field(default="off", description="off | verify_findings | scan_all_files")
+
+
+class CodeScanRequest(BaseModel):
+    target: str = Field(..., min_length=1, max_length=MAX_SCAN_TARGET_LENGTH)
+    target_type: str = Field(default="path", description="path | git_local | git_remote | archive")
+    include_globs: list[str] = Field(default_factory=list)
+    exclude_globs: list[str] = Field(default_factory=list)
+    llm: LlmCheckConfig | None = None
+
+
+class CodeFindingResponse(BaseModel):
+    rule_id: str
+    title: str
+    description: str
+    severity: str
+    confidence: str
+    category: str
+    file_path: str
+    line_start: int
+    line_end: int
+    snippet: str
+    remediation: str
+    llm_verdict: str | None = None
+    llm_rationale: str | None = None
+
+
+class CodeScanResponse(BaseModel):
+    target: str
+    target_type: str
+    algorithm: str
+    files_scanned: int
+    files_skipped: int
+    bytes_scanned: int
+    elapsed_seconds: float
+    findings: list[CodeFindingResponse]
+    skipped_examples: list[str]
+    git_metadata: dict[str, str]
+    score: float = Field(..., ge=0.0, le=1.0)
+    risk: str
+    recommendation: str
+    finding_counts: dict[str, int]
