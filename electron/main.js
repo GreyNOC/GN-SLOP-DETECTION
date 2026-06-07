@@ -8,6 +8,25 @@ const path = require("path");
 let backendProcess = null;
 let backendBaseUrl = null;
 let mainWindow = null;
+let backendLogPath = null;
+
+function backendLogFile() {
+  if (backendLogPath) {
+    return backendLogPath;
+  }
+  // Write to the per-user app-data directory so the file survives across
+  // sessions and we have a stable location to point users at when they
+  // hit a 500. Falls back to the system tmpdir if userData is unavailable.
+  const baseDir = app.getPath("userData") || require("os").tmpdir();
+  try {
+    fs.mkdirSync(baseDir, { recursive: true });
+  } catch (error) {
+    // Ignore: the path almost always exists. Worst case the open below
+    // surfaces the real reason.
+  }
+  backendLogPath = path.join(baseDir, "backend.log");
+  return backendLogPath;
+}
 
 function repoRoot() {
   return path.resolve(__dirname, "..");
@@ -98,12 +117,32 @@ async function startBackend() {
     UVICORN_LOG_LEVEL: "warning",
   };
 
-  backendProcess = spawn(backend.command, backend.args, {
-    cwd: backend.cwd,
-    env,
-    stdio: app.isPackaged ? "ignore" : "inherit",
-    windowsHide: true,
-  });
+  if (app.isPackaged) {
+    // Capture backend stdout/stderr into a log file so production crashes
+    // (uncaught exceptions, missing static files, dependency mismatches)
+    // leave a traceback the user can send back to us. Previously stdio
+    // was "ignore" and every 500 vanished without explanation.
+    const logFile = backendLogFile();
+    const logStream = fs.createWriteStream(logFile, { flags: "a" });
+    logStream.write(
+      `\n=== backend start ${new Date().toISOString()} pid=${process.pid} ===\n`,
+    );
+    backendProcess = spawn(backend.command, backend.args, {
+      cwd: backend.cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    backendProcess.stdout.pipe(logStream);
+    backendProcess.stderr.pipe(logStream);
+  } else {
+    backendProcess = spawn(backend.command, backend.args, {
+      cwd: backend.cwd,
+      env,
+      stdio: "inherit",
+      windowsHide: true,
+    });
+  }
 
   backendProcess.once("exit", (code) => {
     if (mainWindow && !mainWindow.isDestroyed()) {

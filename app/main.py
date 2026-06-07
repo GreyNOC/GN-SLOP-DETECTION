@@ -1,3 +1,5 @@
+import logging
+import os
 import time
 from collections import deque
 from pathlib import Path
@@ -12,9 +14,22 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routes import router
 from app.core.settings import get_settings
 
+logger = logging.getLogger("gn_slop")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(os.environ.get("GN_SLOP_LOG_LEVEL", "INFO").upper())
+
 settings = get_settings()
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+# Resolve the dashboard HTML path once so a missing file fails fast at
+# startup and a serving error doesn't surface as an opaque 500 on every
+# user navigation.
+DASHBOARD_HTML = (STATIC_DIR / "index.html").resolve()
+if not DASHBOARD_HTML.is_file():
+    logger.warning("Dashboard HTML missing at expected location: %s", DASHBOARD_HTML)
 CONTENT_SECURITY_POLICY = "; ".join(
     [
         "default-src 'self'",
@@ -148,9 +163,32 @@ async def add_security_headers(request: Request, call_next) -> Response:
     return response
 
 
+@app.exception_handler(Exception)
+async def _log_and_500(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all so uncaught exceptions leave a traceback in the backend log
+    instead of vanishing into the void on the user's machine. Production
+    builds capture stderr to a file (see electron/main.js), so this
+    logger.exception call is what gives us something to look at when a
+    user reports an internal server error."""
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    detail = (
+        f"{type(exc).__name__}: {exc}"
+        if settings.environment != "production"
+        else "Internal server error. Check the backend log for the traceback."
+    )
+    return JSONResponse(status_code=500, content={"detail": detail})
+
+
 @app.get("/", include_in_schema=False)
-def dashboard() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+def dashboard() -> Response:
+    if not DASHBOARD_HTML.is_file():
+        logger.error("Dashboard HTML not found at %s", DASHBOARD_HTML)
+        return HTMLResponse(
+            "<h1>Dashboard not installed.</h1>"
+            "<p>The packaged dashboard files are missing. Reinstall the app.</p>",
+            status_code=500,
+        )
+    return FileResponse(DASHBOARD_HTML)
 
 
 @app.get("/docs", include_in_schema=False)
@@ -159,7 +197,11 @@ def custom_docs() -> HTMLResponse:
         openapi_url=app.openapi_url,
         title=f"{settings.app_name} - Swagger UI",
     )
-    html = swagger_response.body.decode("utf-8")
+    body = swagger_response.body
+    if isinstance(body, bytes | bytearray | memoryview):
+        html = bytes(body).decode("utf-8", errors="replace")
+    else:
+        html = str(body)
     html = html.replace("<body>", f"<body>{DOCS_HOME_BAR}", 1)
     return HTMLResponse(html)
 

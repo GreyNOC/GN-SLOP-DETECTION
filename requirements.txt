@@ -1,4 +1,8 @@
 fastapi==0.115.6
+# fastapi 0.115.x declares starlette>=0.40,<0.42 but pip will happily
+# resolve an out-of-range starlette in mixed environments — pin it
+# explicitly so the PyInstaller bundle stays reproducible.
+starlette>=0.41,<0.42
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 python-dotenv==1.0.1
