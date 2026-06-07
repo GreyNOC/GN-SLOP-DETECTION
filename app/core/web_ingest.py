@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import re
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Final
 from urllib.error import HTTPError, URLError
@@ -37,12 +38,20 @@ class FetchedWebsite:
     status_code: int
     content_type: str
     byte_count: int
+    redirect_count: int = 0
+    redirect_chain: tuple[str, ...] = field(default_factory=tuple)
+    extraction_text_length: int = 0
+    content_hash: str | None = None
+    meta_description: str | None = None
+    open_graph_title: str | None = None
+    open_graph_description: str | None = None
 
 
 class SafeRedirectHandler(HTTPRedirectHandler):
     def __init__(self, allow_private_urls: bool) -> None:
         self.allow_private_urls = allow_private_urls
         self.redirect_count = 0
+        self.redirect_chain: list[str] = []
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, N802
         self.redirect_count += 1
@@ -53,23 +62,49 @@ class SafeRedirectHandler(HTTPRedirectHandler):
         # Re-run full validation on every redirect target so DNS rebinding or
         # cross-protocol bounces are rejected at the same gate as the original URL.
         safe_url = _enforce_url_policy(safe_url, self.allow_private_urls)
+        self.redirect_chain.append(safe_url)
         return super().redirect_request(req, fp, code, msg, headers, safe_url)
 
 
 class ReadableHTMLParser(HTMLParser):
+    # Tags whose text content we keep, weighted into the readable
+    # extraction. Body text from these is more useful than scattered
+    # nav/menu chrome.
+    _CONTENT_TAGS = {
+        "p", "div", "section", "article", "main", "header", "footer",
+        "li", "br", "h1", "h2", "h3", "h4", "h5", "h6",
+    }
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._skip_depth = 0
         self._in_title = False
         self._chunks: list[str] = []
         self._title_chunks: list[str] = []
+        self.meta_description: str | None = None
+        self.open_graph_title: str | None = None
+        self.open_graph_description: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in {"script", "style", "noscript", "svg", "canvas"}:
             self._skip_depth += 1
         if tag == "title":
             self._in_title = True
-        if tag in {"p", "div", "section", "article", "header", "footer", "li", "br", "h1", "h2", "h3", "h4"}:
+        if tag == "meta":
+            attr_map = {key.lower(): (value or "") for key, value in attrs}
+            content = attr_map.get("content", "").strip()
+            if not content:
+                return
+            name = attr_map.get("name", "").lower()
+            prop = attr_map.get("property", "").lower()
+            if name == "description" and not self.meta_description:
+                self.meta_description = content[:600]
+            elif prop == "og:title" and not self.open_graph_title:
+                self.open_graph_title = content[:240]
+            elif prop == "og:description" and not self.open_graph_description:
+                self.open_graph_description = content[:600]
+            return
+        if tag in self._CONTENT_TAGS:
             self._chunks.append(" ")
 
     def handle_endtag(self, tag: str) -> None:
@@ -77,7 +112,7 @@ class ReadableHTMLParser(HTMLParser):
             self._skip_depth -= 1
         if tag == "title":
             self._in_title = False
-        if tag in {"p", "div", "section", "article", "header", "footer", "li", "h1", "h2", "h3", "h4"}:
+        if tag in self._CONTENT_TAGS:
             self._chunks.append(" ")
 
     def handle_data(self, data: str) -> None:
@@ -129,7 +164,8 @@ def fetch_website_text(url: str) -> FetchedWebsite:
         },
         method="GET",
     )
-    opener = build_opener(SafeRedirectHandler(settings.allow_private_urls))
+    redirect_handler = SafeRedirectHandler(settings.allow_private_urls)
+    opener = build_opener(redirect_handler)
 
     try:
         with opener.open(request, timeout=settings.web_fetch_timeout_seconds) as response:
@@ -182,11 +218,29 @@ def fetch_website_text(url: str) -> FetchedWebsite:
     except TimeoutError as error:
         raise WebsiteFetchError("Website fetch timed out.") from error
 
+    meta_description: str | None = None
+    open_graph_title: str | None = None
+    open_graph_description: str | None = None
     if content_type in {"text/html", "application/xhtml+xml"}:
         parser = ReadableHTMLParser()
         parser.feed(body)
         text = parser.text
         title = parser.title
+        meta_description = parser.meta_description
+        open_graph_title = parser.open_graph_title
+        open_graph_description = parser.open_graph_description
+        # If the body text was thin and we got meaningful OG / meta
+        # text, splice it into the extraction so the downstream detector
+        # has more signal to work with.
+        extras: list[str] = []
+        if open_graph_title and open_graph_title not in text:
+            extras.append(open_graph_title)
+        if open_graph_description and open_graph_description not in text:
+            extras.append(open_graph_description)
+        if meta_description and meta_description not in text:
+            extras.append(meta_description)
+        if extras:
+            text = (" ".join(extras) + " " + text).strip()
     else:
         text = _clean_text(body)
         title = None
@@ -202,6 +256,13 @@ def fetch_website_text(url: str) -> FetchedWebsite:
         status_code=status_code,
         content_type=content_type,
         byte_count=len(raw),
+        redirect_count=redirect_handler.redirect_count,
+        redirect_chain=tuple(redirect_handler.redirect_chain),
+        extraction_text_length=len(text),
+        content_hash=hashlib.sha256(raw).hexdigest(),
+        meta_description=meta_description,
+        open_graph_title=open_graph_title,
+        open_graph_description=open_graph_description,
     )
 
 

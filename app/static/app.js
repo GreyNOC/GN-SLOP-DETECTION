@@ -52,6 +52,15 @@ const signalsTableHead = document.querySelector("#signalsTableHead");
 const findingsActions = document.querySelector("#findingsActions");
 const expandAllButton = document.querySelector("#expandAllButton");
 const downloadReportButton = document.querySelector("#downloadReportButton");
+const downloadJsonButton = document.querySelector("#downloadJsonButton");
+const downloadSarifButton = document.querySelector("#downloadSarifButton");
+const findingsBanner = document.querySelector("#findingsBanner");
+const findingsSeverityFilter = document.querySelector("#findingsSeverityFilter");
+const findingsCategoryFilter = document.querySelector("#findingsCategoryFilter");
+const findingsTextFilter = document.querySelector("#findingsTextFilter");
+const wordMetricLabel = document.querySelector("#wordMetricLabel");
+const signalMetricLabel = document.querySelector("#signalMetricLabel");
+const codeIncludeInput = document.querySelector("#codeIncludeInput");
 
 const TEXT_SIGNALS_HEADERS = ["Signal", "Category", "Weight", "Count", "Description"];
 const CODE_SIGNALS_HEADERS = [
@@ -148,6 +157,7 @@ function setMode(mode) {
     codeModeButton.setAttribute("aria-selected", String(isCode));
   }
   updateCounter();
+  setMetricLabels(mode);
   if (isUrl) {
     urlInput.focus();
   } else if (isMedia && mediaInput) {
@@ -495,23 +505,26 @@ async function runCodeScan() {
 
   setState("Scanning", true);
   try {
-    const excludeGlobs = (codeExcludeInput?.value || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const parseGlobs = (raw) =>
+      (raw || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const includeGlobs = parseGlobs(codeIncludeInput?.value);
+    const excludeGlobs = parseGlobs(codeExcludeInput?.value);
     let response;
     if (type === "archive") {
       const formData = new FormData();
       formData.append("file", archiveFile);
-      if (excludeGlobs.length) {
-        formData.append("exclude_globs", excludeGlobs.join(","));
-      }
+      if (includeGlobs.length) formData.append("include_globs", includeGlobs.join(","));
+      if (excludeGlobs.length) formData.append("exclude_globs", excludeGlobs.join(","));
       response = await fetch("/api/v1/scan-code/upload", { method: "POST", body: formData });
     } else {
       const llm = buildLlmPayload();
       const body = {
         target,
         target_type: type,
+        include_globs: includeGlobs,
         exclude_globs: excludeGlobs,
       };
       if (llm) {
@@ -527,6 +540,11 @@ async function runCodeScan() {
     if (!response.ok) {
       throw new Error(payload.detail || `Scan failed with ${response.status}`);
     }
+    // Stash the scope the user actually scanned with so subsequent
+    // exports (notably SARIF, which re-posts to the backend) reuse the
+    // same include/exclude globs and don't quietly leak excluded files.
+    payload._scan_include_globs = includeGlobs;
+    payload._scan_exclude_globs = excludeGlobs;
     renderCodeResult(payload);
     setState("Complete");
   } catch (error) {
@@ -552,8 +570,23 @@ function setSignalsHeaders(labels) {
   `;
 }
 
+function setMetricLabels(mode) {
+  if (!wordMetricLabel || !signalMetricLabel) return;
+  if (mode === "media") {
+    wordMetricLabel.textContent = "Bytes";
+    signalMetricLabel.textContent = "Findings";
+  } else if (mode === "code") {
+    wordMetricLabel.textContent = "Files scanned";
+    signalMetricLabel.textContent = "Findings";
+  } else {
+    wordMetricLabel.textContent = "Words";
+    signalMetricLabel.textContent = "Signals";
+  }
+}
+
 function renderCodeResult(payload) {
   lastCodePayload = payload;
+  setMetricLabels("code");
   const score = Number(payload.score) || 0;
   const risk = payload.risk || "neutral";
   const riskLabel = riskLabels[risk] || "Ready";
@@ -579,49 +612,61 @@ function renderCodeResult(payload) {
 
   setSignalsHeaders(CODE_SIGNALS_HEADERS);
   const findings = payload.findings || [];
+  // Populate the category filter from the actual findings so the dropdown
+  // only offers categories that exist in this scan.
+  if (findingsCategoryFilter) {
+    const seen = new Set();
+    const options = ['<option value="">All categories</option>'];
+    for (const finding of findings) {
+      const value = finding.category || "uncategorised";
+      if (!seen.has(value)) {
+        seen.add(value);
+        options.push(`<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`);
+      }
+    }
+    findingsCategoryFilter.innerHTML = options.join("");
+    findingsCategoryFilter.value = "";
+  }
+  if (findingsSeverityFilter) findingsSeverityFilter.value = "";
+  if (findingsTextFilter) findingsTextFilter.value = "";
+
+  const renderableCount = Math.min(findings.length, 250);
   if (!findings.length) {
     signalsTable.innerHTML =
       '<tr><td colspan="5" class="empty-cell">No findings detected at this scan depth.</td></tr>';
     if (findingsActions) findingsActions.hidden = true;
   } else {
-    const rendered = findings.slice(0, 250);
+    const rendered = findings.slice(0, renderableCount);
     signalsTable.innerHTML = rendered
-      .map(
-        (finding, index) => `
-          <tr class="finding-row expandable" data-finding-index="${index}">
-            <td>${escapeHtml(finding.rule_id)}</td>
-            <td>
-              <span class="finding-severity-pill ${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span>
-              <span class="finding-severity-pill ${escapeHtml(finding.confidence)}">${escapeHtml(finding.confidence)}</span>
-            </td>
-            <td>${escapeHtml(finding.category)}</td>
-            <td>${escapeHtml(finding.file_path)}:${escapeHtml(String(finding.line_start))}</td>
-            <td>${escapeHtml(finding.title)}</td>
-          </tr>
-          <tr class="finding-detail-row" data-detail-for="${index}" hidden>
-            <td colspan="5">
-              <div class="finding-detail">
-                <div class="finding-detail-section">
-                  <span class="finding-detail-label">Description</span>
-                  <div>${escapeHtml(finding.description || finding.title)}</div>
-                </div>
-                <div class="finding-detail-section">
-                  <span class="finding-detail-label">Probe (offending code)</span>
-                  <pre class="finding-detail-snippet">${escapeHtml(finding.snippet || "(no snippet captured)")}</pre>
-                </div>
-                <div class="finding-detail-section">
-                  <span class="finding-detail-label">Suggested fix</span>
-                  <div class="finding-detail-remediation">${escapeHtml(finding.remediation || "(no remediation provided for this rule)")}</div>
-                </div>
-              </div>
-            </td>
-          </tr>
-        `,
-      )
+      .map((finding, index) => buildCodeFindingRows(finding, index))
       .join("");
     bindFindingExpanders();
     if (findingsActions) findingsActions.hidden = false;
   }
+  if (findingsBanner) {
+    const messages = [];
+    if (findings.length > renderableCount) {
+      messages.push(
+        `Showing ${renderableCount.toLocaleString()} of ${findings.length.toLocaleString()} findings.`,
+      );
+    }
+    if (payload.redactions_present) {
+      messages.push("Secret values were redacted; original literals never leave the engine.");
+    }
+    if (payload.suppressed_count > 0) {
+      messages.push(`${payload.suppressed_count} finding(s) suppressed via gn-slop comments.`);
+    }
+    if (payload.rule_errors && payload.rule_errors.length) {
+      messages.push(`${payload.rule_errors.length} rule(s) errored — see report for details.`);
+    }
+    if (messages.length) {
+      findingsBanner.textContent = messages.join("  ");
+      findingsBanner.hidden = false;
+    } else {
+      findingsBanner.hidden = true;
+    }
+  }
+  applyCodeFilters();
 
   const counts = payload.finding_counts || {};
   const flags = [
@@ -652,9 +697,88 @@ function renderCodeResult(payload) {
     '<div class="empty-block">Dimension scores apply to text analysis only.</div>';
 }
 
+function buildCodeFindingRows(finding, index) {
+  const llmRow = finding.llm_verdict
+    ? `
+            <div class="finding-detail-section">
+              <span class="finding-detail-label">LLM verification (${escapeHtml(finding.llm_verdict)})</span>
+              <div>${escapeHtml(finding.llm_rationale || "")}</div>
+            </div>`
+    : "";
+  const redactedNote = finding.redacted
+    ? '<small style="color: var(--amber)">Snippet redacted — secret value never leaves the engine.</small>'
+    : "";
+  return `
+    <tr class="finding-row expandable"
+        data-finding-index="${index}"
+        data-severity="${escapeHtml(finding.severity)}"
+        data-category="${escapeHtml(finding.category || "")}"
+        tabindex="0"
+        role="button"
+        aria-expanded="false">
+      <td>${escapeHtml(finding.rule_id)}</td>
+      <td>
+        <span class="finding-severity-pill ${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span>
+        <span class="finding-severity-pill ${escapeHtml(finding.confidence)}">${escapeHtml(finding.confidence)}</span>
+      </td>
+      <td>${escapeHtml(finding.category || "")}</td>
+      <td>${escapeHtml(finding.file_path)}:${escapeHtml(String(finding.line_start))}</td>
+      <td>${escapeHtml(finding.title)}</td>
+    </tr>
+    <tr class="finding-detail-row" data-detail-for="${index}" hidden>
+      <td colspan="5">
+        <div class="finding-detail">
+          <div class="finding-detail-section">
+            <span class="finding-detail-label">Description</span>
+            <div>${escapeHtml(finding.description || finding.title)}</div>
+          </div>
+          <div class="finding-detail-section">
+            <span class="finding-detail-label">Probe (offending code)</span>
+            <pre class="finding-detail-snippet">${escapeHtml(finding.snippet || "(no snippet captured)")}</pre>
+            ${redactedNote}
+          </div>
+          <div class="finding-detail-section">
+            <span class="finding-detail-label">Suggested fix</span>
+            <div class="finding-detail-remediation">${escapeHtml(finding.remediation || "(no remediation provided for this rule)")}</div>
+          </div>
+          ${llmRow}
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
 function bindFindingExpanders() {
   signalsTable.querySelectorAll(".finding-row").forEach((row) => {
     row.addEventListener("click", () => toggleFindingRow(row));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleFindingRow(row);
+      }
+    });
+  });
+}
+
+function applyCodeFilters() {
+  if (!signalsTable) return;
+  const severity = findingsSeverityFilter?.value || "";
+  const category = findingsCategoryFilter?.value || "";
+  const query = (findingsTextFilter?.value || "").toLowerCase().trim();
+  const rows = signalsTable.querySelectorAll(".finding-row");
+  rows.forEach((row) => {
+    const detail = signalsTable.querySelector(
+      `.finding-detail-row[data-detail-for="${row.dataset.findingIndex}"]`,
+    );
+    let visible = true;
+    if (severity && row.dataset.severity !== severity) visible = false;
+    if (category && row.dataset.category !== category) visible = false;
+    if (query) {
+      const text = row.textContent.toLowerCase();
+      if (!text.includes(query)) visible = false;
+    }
+    row.hidden = !visible;
+    if (detail) detail.hidden = !visible || !row.classList.contains("expanded");
   });
 }
 
@@ -668,6 +792,7 @@ function toggleFindingRow(row) {
   const expanded = !detail.hidden;
   detail.hidden = expanded;
   row.classList.toggle("expanded", !expanded);
+  row.setAttribute("aria-expanded", String(!expanded));
 }
 
 function setAllFindingsExpanded(expanded) {
@@ -691,6 +816,7 @@ function buildReportHtml(payload) {
   const generated = new Date().toISOString();
   const score = Number(payload.score) || 0;
   const findings = payload.findings || [];
+  const ruleErrors = payload.rule_errors || [];
   const grouped = {};
   for (const finding of findings) {
     const key = finding.severity || "info";
@@ -731,6 +857,16 @@ function buildReportHtml(payload) {
                 <span class="block-label">Suggested fix</span>
                 <p>${escapeReportHtml(finding.remediation || "(no remediation provided for this rule)")}</p>
               </div>
+              ${
+                finding.redacted
+                  ? '<p class="redaction-note"><strong>Redacted.</strong> The secret value was removed before this report was generated; the original literal never leaves the engine.</p>'
+                  : ""
+              }
+              ${
+                finding.llm_verdict
+                  ? `<div class="block"><span class="block-label">LLM verification (${escapeReportHtml(finding.llm_verdict)})</span><p>${escapeReportHtml(finding.llm_rationale || "")}</p></div>`
+                  : ""
+              }
             </article>
           `,
         )
@@ -775,6 +911,8 @@ function buildReportHtml(payload) {
   .block-label { display: block; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #666; margin-bottom: 4px; }
   pre { background: #0f1419; color: #e6e7e9; padding: 10px 14px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, monospace; font-size: 0.85rem; }
   code { font-family: ui-monospace, monospace; background: #f0f0f0; padding: 1px 4px; }
+  .redaction-banner { background: #fff7d6; border: 1px solid #f0b429; padding: 8px 12px; }
+  .redaction-note { background: #fff7d6; border-left: 3px solid #f0b429; padding: 6px 10px; margin-top: 8px; font-size: 0.85rem; }
   footer { margin-top: 36px; padding-top: 12px; border-top: 1px solid #ddd; color: #666; font-size: 0.8rem; }
 </style>
 </head>
@@ -803,8 +941,28 @@ function buildReportHtml(payload) {
       .join("")}
   </div>
   ${
+    payload.redactions_present
+      ? '<p class="redaction-banner"><strong>Redactions applied.</strong> Secret values in this report have been redacted to short prefix + sha256 placeholders. Originals never left the engine.</p>'
+      : ""
+  }
+  ${
     sections ||
     '<p><em>No findings recorded. The scanner did not match any of its bundled rules against the target.</em></p>'
+  }
+  ${
+    payload.suppressed_count
+      ? `<h2>Suppressed</h2><p>${escapeReportHtml(String(payload.suppressed_count))} finding(s) suppressed via gn-slop: ignore comments in source.</p>`
+      : ""
+  }
+  ${
+    ruleErrors.length
+      ? `<h2>Rule errors</h2><ul>${ruleErrors
+          .map(
+            (err) =>
+              `<li><code>${escapeReportHtml(err.rule_id)}</code> on <code>${escapeReportHtml(err.file || "")}</code>: ${escapeReportHtml(err.error || "")}</li>`,
+          )
+          .join("")}</ul>`
+      : ""
   }
   <footer>
     Generated by GreyNOC Slop Detection — local-only static scan, no model bundled.
@@ -814,20 +972,126 @@ function buildReportHtml(payload) {
 </html>`;
 }
 
-function downloadFullReport() {
-  if (!lastCodePayload) return;
-  const html = buildReportHtml(lastCodePayload);
-  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+function triggerDownload(filename, content, mime) {
+  const blob = new Blob([content], { type: `${mime};charset=utf-8` });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   link.href = url;
-  link.download = `greynoc-code-scan-${stamp}.html`;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
-  // Revoke later so the download has time to complete.
   setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+function isoStamp() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function downloadFullReport() {
+  if (!lastCodePayload) return;
+  const html = buildReportHtml(lastCodePayload);
+  triggerDownload(`greynoc-code-scan-${isoStamp()}.html`, html, "text/html");
+}
+
+function downloadJsonPayload() {
+  if (!lastCodePayload) return;
+  triggerDownload(
+    `greynoc-code-scan-${isoStamp()}.json`,
+    JSON.stringify(lastCodePayload, null, 2),
+    "application/json",
+  );
+}
+
+async function downloadSarifPayload() {
+  if (!lastCodePayload) return;
+  // For non-archive targets we ask the backend for an authoritative
+  // SARIF; for archive scans the original archive is gone, so we
+  // synthesize a minimal SARIF from the cached payload.
+  const targetType = lastCodePayload.target_type;
+  if (targetType === "archive" || !lastCodePayload.target) {
+    triggerDownload(
+      `greynoc-code-scan-${isoStamp()}.sarif.json`,
+      JSON.stringify(buildClientSarif(lastCodePayload), null, 2),
+      "application/sarif+json",
+    );
+    return;
+  }
+  try {
+    // Reuse the include/exclude globs from the original scan so the
+    // SARIF result matches what the dashboard already shows. Without
+    // this, the backend would do a fresh unscoped scan and return
+    // findings for files the user explicitly excluded.
+    const response = await fetch("/api/v1/scan-code/sarif", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target: lastCodePayload.target,
+        target_type: targetType,
+        include_globs: lastCodePayload._scan_include_globs || [],
+        exclude_globs: lastCodePayload._scan_exclude_globs || [],
+      }),
+    });
+    if (!response.ok) {
+      throw new Error("SARIF endpoint returned non-2xx");
+    }
+    const sarif = await response.json();
+    triggerDownload(
+      `greynoc-code-scan-${isoStamp()}.sarif.json`,
+      JSON.stringify(sarif, null, 2),
+      "application/sarif+json",
+    );
+  } catch (_error) {
+    triggerDownload(
+      `greynoc-code-scan-${isoStamp()}.sarif.json`,
+      JSON.stringify(buildClientSarif(lastCodePayload), null, 2),
+      "application/sarif+json",
+    );
+  }
+}
+
+function buildClientSarif(payload) {
+  const findings = payload.findings || [];
+  return {
+    $schema: "https://json.schemastore.org/sarif-2.1.0.json",
+    version: "2.1.0",
+    runs: [
+      {
+        tool: {
+          driver: {
+            name: "GreyNOC Slop Detection",
+            version: payload.algorithm || "code-picture-v2",
+          },
+        },
+        results: findings.map((finding) => ({
+          ruleId: finding.rule_id,
+          level: ({ critical: "error", high: "error", medium: "warning" }[finding.severity] || "note"),
+          message: { text: finding.description || finding.title },
+          locations: [
+            {
+              physicalLocation: {
+                artifactLocation: { uri: finding.file_path },
+                region: { startLine: finding.line_start, endLine: finding.line_end },
+              },
+            },
+          ],
+          properties: {
+            category: finding.category,
+            confidence: finding.confidence,
+            redacted: !!finding.redacted,
+            llm_verdict: finding.llm_verdict || null,
+          },
+        })),
+        properties: {
+          target: payload.target,
+          score: payload.score,
+          risk: payload.risk,
+          suppressed_count: payload.suppressed_count || 0,
+          redactions_present: !!payload.redactions_present,
+        },
+      },
+    ],
+  };
 }
 
 function setHealth(state, label) {
@@ -943,6 +1207,21 @@ if (expandAllButton) {
 }
 if (downloadReportButton) {
   downloadReportButton.addEventListener("click", downloadFullReport);
+}
+if (downloadJsonButton) {
+  downloadJsonButton.addEventListener("click", downloadJsonPayload);
+}
+if (downloadSarifButton) {
+  downloadSarifButton.addEventListener("click", downloadSarifPayload);
+}
+if (findingsSeverityFilter) {
+  findingsSeverityFilter.addEventListener("change", applyCodeFilters);
+}
+if (findingsCategoryFilter) {
+  findingsCategoryFilter.addEventListener("change", applyCodeFilters);
+}
+if (findingsTextFilter) {
+  findingsTextFilter.addEventListener("input", applyCodeFilters);
 }
 form.addEventListener("submit", analyzeText);
 updateCounter();

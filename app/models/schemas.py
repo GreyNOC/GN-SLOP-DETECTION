@@ -10,6 +10,9 @@ MAX_MEDIA_FILENAME_LENGTH: Final = 256
 MAX_SCAN_TARGET_LENGTH: Final = 4_096
 
 
+CONTENT_PROFILES: Final = ("general", "soc", "marketing", "academic", "support")
+
+
 class AnalyzeRequest(BaseModel):
     text: str = Field(
         ...,
@@ -21,6 +24,10 @@ class AnalyzeRequest(BaseModel):
         default=None,
         max_length=MAX_SOURCE_LENGTH,
         description="Optional source label, file name, or ticket ID",
+    )
+    profile: str = Field(
+        default="general",
+        description="Content profile for scoring tweaks: " + " | ".join(CONTENT_PROFILES),
     )
 
 
@@ -36,6 +43,13 @@ class AnalyzeUrlRequest(BaseModel):
         max_length=MAX_SOURCE_LENGTH,
         description="Optional source label, case ID, or analyst note",
     )
+    profile: str = Field(default="general", description="Same profile knob as /analyze.")
+
+
+class SignalMatch(BaseModel):
+    term: str
+    excerpt: str
+    line: int | None = None
 
 
 class Signal(BaseModel):
@@ -44,6 +58,7 @@ class Signal(BaseModel):
     weight: float
     count: int
     description: str
+    matches: list[SignalMatch] = Field(default_factory=list)
 
 
 class Dimension(BaseModel):
@@ -72,6 +87,13 @@ class WebsiteMetadata(BaseModel):
     status_code: int
     content_type: str
     byte_count: int
+    redirect_count: int = 0
+    redirect_chain: list[str] = Field(default_factory=list)
+    extraction_text_length: int = 0
+    content_hash: str | None = None
+    meta_description: str | None = None
+    open_graph_title: str | None = None
+    open_graph_description: str | None = None
 
 
 class AnalyzeResponse(BaseModel):
@@ -85,6 +107,20 @@ class AnalyzeResponse(BaseModel):
     profile: ContentProfile
     website: WebsiteMetadata | None = None
     recommendation: str
+    content_profile: str = Field(
+        default="general",
+        description="Profile used for scoring (general, soc, marketing, academic, support).",
+    )
+    sample_quality: str = Field(
+        default="medium",
+        description="low | medium | high — small samples get low confidence regardless of score.",
+    )
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Engine confidence in the composite score (lower for very short inputs).",
+    )
 
 
 class BatchAnalyzeRequest(BaseModel):
@@ -99,6 +135,13 @@ class MediaFinding(BaseModel):
     marker: str
     confidence: str
     detail: str | None = None
+    category: str = Field(
+        default="structural",
+        description=(
+            "provenance | synthetic_generation | editing_transcode | "
+            "tamper_smuggling | structural"
+        ),
+    )
 
 
 class MediaAnalysisResponse(BaseModel):
@@ -119,6 +162,8 @@ class MediaAnalysisResponse(BaseModel):
     tool_fingerprints: list[str]
     findings: list[MediaFinding]
     recommendation: str
+    parse_status: str = Field(default="ok", description="ok | unsupported | malformed | parser_error")
+    parse_warning: str | None = None
 
 
 class LlmCheckConfig(BaseModel):
@@ -149,6 +194,7 @@ class CodeFindingResponse(BaseModel):
     line_end: int
     snippet: str
     remediation: str
+    redacted: bool = False
     llm_verdict: str | None = None
     llm_rationale: str | None = None
 
@@ -168,3 +214,7 @@ class CodeScanResponse(BaseModel):
     risk: str
     recommendation: str
     finding_counts: dict[str, int]
+    total_findings: int = 0
+    suppressed_count: int = 0
+    rule_errors: list[dict[str, str]] = Field(default_factory=list)
+    redactions_present: bool = False

@@ -27,9 +27,14 @@ return an empty analysis rather than raising, so the caller can treat
 from __future__ import annotations
 
 import re
+import zlib
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Final
+
+# Hard cap on the zlib-decompressed bytes we accept from a single PNG
+# zTXt chunk. Without it a tiny compressed blob could expand to GiB.
+_ZTXT_MAX_DECOMPRESSED: Final = 64 * 1024
 
 
 class MediaFormat(str, Enum):
@@ -68,6 +73,12 @@ class MediaFinding:
     marker: str
     confidence: str  # "low" | "medium" | "high"
     detail: str | None = None
+    # One of: "provenance" | "synthetic_generation" | "editing_transcode"
+    # | "tamper_smuggling" | "structural". Used by the dashboard to
+    # group findings by what they actually mean — C2PA Content
+    # Credentials, for example, is a *provenance* finding rather than
+    # a synthetic-generation one, and the score should reflect that.
+    category: str = "structural"
 
 
 @dataclass
@@ -87,12 +98,16 @@ class MediaAnalysis:
     score: float = 0.0
     risk: str = "low"
     recommendation: str = ""
-    algorithm: str = "media-picture-v2"
+    algorithm: str = "media-picture-v3"
     # Structural ISO BMFF / container details surfaced for video heuristics.
     ftyp_brand: str = ""
     compatible_brands: list[str] = field(default_factory=list)
     video_track_count: int = 0
     audio_track_count: int = 0
+    # Parse status surfaced so the analyst knows whether the result is
+    # a complete picture or a best-effort one.
+    parse_status: str = "ok"  # "ok" | "unsupported" | "malformed" | "parser_error"
+    parse_warning: str | None = None
 
 
 _MAX_DECODED_TEXT: Final = 8 * 1024
@@ -266,8 +281,21 @@ def _parse_png(data: bytes) -> MediaAnalysis:
                 if p < data_end:
                     decoded_parts.append(f"{keyword}={_decode_latin1(data, p, data_end)}")
             else:
-                # zTXt — keyword visible in cleartext; payload is zlib-compressed.
-                decoded_parts.append(f"{keyword}=<compressed>")
+                # zTXt — keyword visible in cleartext, payload is zlib
+                # deflate. Decompress under a strict size cap so an
+                # adversarial PNG can't burn memory.
+                # Layout after keyword\0: 1 byte compression method,
+                # then deflate stream.
+                comp_start = kw_end + 2
+                try:
+                    deco = zlib.decompressobj()
+                    inflated = deco.decompress(
+                        data[comp_start:data_end], _ZTXT_MAX_DECOMPRESSED
+                    )
+                    text = inflated.decode("latin-1", errors="replace")
+                    decoded_parts.append(f"{keyword}={text}")
+                except (zlib.error, ValueError):
+                    decoded_parts.append(f"{keyword}=<compressed>")
         elif chunk_type == "iCCP":
             analysis.generative_metadata_keys.append("iCCP")
         elif chunk_type == "eXIf":
@@ -459,6 +487,16 @@ def _parse_isobmff(data: bytes, format_: MediaFormat) -> MediaAnalysis:
     return analysis
 
 
+def _fingerprint_category(name: str) -> str:
+    if "C2PA" in name:
+        return "provenance"
+    if "Photoshop" in name:
+        return "editing_transcode"
+    if "FFmpeg" in name or "x264" in name or "x265" in name:
+        return "editing_transcode"
+    return "synthetic_generation"
+
+
 def _enrich_with_fingerprints(analysis: MediaAnalysis) -> None:
     text = analysis.decoded_text_sample
     # Each fingerprint hit is paired with its per-pattern confidence so the
@@ -474,11 +512,19 @@ def _enrich_with_fingerprints(analysis: MediaAnalysis) -> None:
                 seen.add(name)
 
     if analysis.has_c2pa_manifest:
+        # C2PA is provenance information, not a "this is synthetic"
+        # marker. Keep medium confidence and let the dashboard show
+        # the category honestly.
         analysis.findings.append(
             MediaFinding(
                 marker="C2PA Content Credentials manifest present",
-                confidence="high",
-                detail="A JUMBF box or C2PA reference was detected in the file bytes.",
+                confidence="medium",
+                detail=(
+                    "A JUMBF box or C2PA reference was detected. C2PA is a "
+                    "provenance signal: the file declares an editing / capture "
+                    "chain. Inspect the manifest to learn what tools touched it."
+                ),
+                category="provenance",
             )
         )
     if analysis.has_synthid_marker:
@@ -487,6 +533,7 @@ def _enrich_with_fingerprints(analysis: MediaAnalysis) -> None:
                 marker="Google SynthID provenance marker",
                 confidence="high",
                 detail="SynthID metadata was detected in the XMP packet.",
+                category="synthetic_generation",
             )
         )
     if analysis.has_xmp_packet and not analysis.has_c2pa_manifest:
@@ -495,6 +542,7 @@ def _enrich_with_fingerprints(analysis: MediaAnalysis) -> None:
                 marker="Adobe XMP packet present",
                 confidence="medium",
                 detail="XMP often carries provenance, tool, and history metadata.",
+                category="provenance",
             )
         )
     if analysis.trailing_bytes > 1024:
@@ -506,6 +554,7 @@ def _enrich_with_fingerprints(analysis: MediaAnalysis) -> None:
                     "Large unaccounted trailers can indicate steganographic payloads "
                     "or smuggled archives appended to the file."
                 ),
+                category="tamper_smuggling",
             )
         )
     for tool in analysis.tool_fingerprints:
@@ -513,6 +562,7 @@ def _enrich_with_fingerprints(analysis: MediaAnalysis) -> None:
             MediaFinding(
                 marker=f"Binary fingerprint: {tool}",
                 confidence=fingerprint_confidence.get(tool, "high"),
+                category=_fingerprint_category(tool),
             )
         )
 
@@ -566,6 +616,7 @@ def _add_video_pipeline_findings(analysis: MediaAnalysis) -> None:
                     "This is the canonical export shape of AI video generators "
                     "such as OpenAI Sora, Runway, Luma Dream Machine, and Pika."
                 ),
+                category="synthetic_generation",
             )
         )
     elif silent_video and has_ffmpeg:
@@ -579,6 +630,7 @@ def _add_video_pipeline_findings(analysis: MediaAnalysis) -> None:
                     "Video has no audio track and was written by libavformat. "
                     "Common pattern for AI-generated video exports."
                 ),
+                category="editing_transcode",
             )
         )
     elif has_ffmpeg and not has_capture_metadata and analysis.kind == MediaKind.VIDEO:
@@ -593,6 +645,7 @@ def _add_video_pipeline_findings(analysis: MediaAnalysis) -> None:
                     "Android-style capture metadata. The file did not come "
                     "directly off a phone or dedicated camera."
                 ),
+                category="editing_transcode",
             )
         )
 
@@ -608,6 +661,7 @@ def _add_video_pipeline_findings(analysis: MediaAnalysis) -> None:
                     "Phones and Apple software that produce 'qt  ' .mov files "
                     "always write com.apple.quicktime.* keys."
                 ),
+                category="editing_transcode",
             )
         )
 
@@ -621,6 +675,7 @@ def _add_video_pipeline_findings(analysis: MediaAnalysis) -> None:
                     "codec (x264/x265). Phones and cameras almost always use "
                     "hardware encoders and capture audio simultaneously."
                 ),
+                category="editing_transcode",
             )
         )
 
@@ -637,6 +692,7 @@ def _add_video_pipeline_findings(analysis: MediaAnalysis) -> None:
                     "audio alongside video. AI video generators (Sora, Runway, "
                     "Luma, Pika) typically produce silent video."
                 ),
+                category="structural",
             )
         )
 
@@ -645,10 +701,28 @@ def _confidence_weight(confidence: str) -> float:
     return {"high": 0.32, "medium": 0.18, "low": 0.08}.get(confidence, 0.0)
 
 
+def _category_weight(category: str) -> float:
+    """How much a category contributes to the overall slop score.
+
+    Provenance markers describe what touched the file but are NOT a
+    "this file is bad" signal — a properly signed C2PA chain on a real
+    photo is the *good* outcome. So provenance contributes only a
+    small amount to the composite. Synthetic-generation and
+    tamper-smuggling carry full weight.
+    """
+    return {
+        "synthetic_generation": 1.0,
+        "tamper_smuggling": 1.0,
+        "editing_transcode": 0.7,
+        "structural": 0.6,
+        "provenance": 0.25,
+    }.get(category, 1.0)
+
+
 def _score_and_classify(analysis: MediaAnalysis) -> None:
     score = 0.0
     for finding in analysis.findings:
-        score += _confidence_weight(finding.confidence)
+        score += _confidence_weight(finding.confidence) * _category_weight(finding.category)
     # Format-specific gentle baselines: a PNG with no metadata at all is
     # suspicious-light because real cameras almost never produce them; a
     # JPEG with no APP segments is unusual too. We keep these small so a
@@ -679,26 +753,167 @@ def _score_and_classify(analysis: MediaAnalysis) -> None:
         analysis.recommendation = "No strong AI / provenance markers detected."
 
 
+def _parse_webp(data: bytes) -> MediaAnalysis:
+    """Parse a WebP file's RIFF chunks for EXIF and XMP metadata.
+
+    WebP is RIFF-based: 12-byte header (RIFF + size + WEBP), then a
+    series of FOURCC chunks (4-byte tag + 4-byte little-endian size +
+    payload + optional padding byte).  We harvest EXIF / XMP chunks,
+    leave VP8 / VP8L / VP8X / ANIM untouched.
+    """
+    analysis = _empty(MediaFormat.WEBP, len(data))
+    if len(data) < 30:
+        analysis.parse_status = "malformed"
+        analysis.parse_warning = "WebP container too short for a RIFF header."
+        return analysis
+    offset = 12
+    decoded_parts: list[str] = []
+    while offset + 8 <= len(data):
+        tag = data[offset : offset + 4]
+        size = int.from_bytes(data[offset + 4 : offset + 8], "little")
+        payload_start = offset + 8
+        payload_end = payload_start + size
+        if payload_end > len(data):
+            analysis.parse_status = "malformed"
+            analysis.parse_warning = (
+                "WebP RIFF chunk size exceeds the file. Stopped at offset "
+                f"{offset}."
+            )
+            break
+        if tag == b"EXIF":
+            analysis.generative_metadata_keys.append("EXIF chunk")
+            decoded_parts.append(
+                _decode_latin1(data, payload_start, min(payload_end, payload_start + 2048))
+            )
+        elif tag == b"XMP ":
+            analysis.has_xmp_packet = True
+            analysis.generative_metadata_keys.append("XMP chunk")
+            xmp_text = _decode_latin1(
+                data, payload_start, min(payload_end, payload_start + 2048)
+            )
+            decoded_parts.append(xmp_text)
+            if re.search(r"c2pa|content\s*credentials|contentauth", xmp_text, re.IGNORECASE):
+                analysis.has_c2pa_manifest = True
+            if re.search(r"synthid", xmp_text, re.IGNORECASE):
+                analysis.has_synthid_marker = True
+        elif tag == b"ICCP":
+            analysis.generative_metadata_keys.append("ICCP color profile")
+        # Skip the VP8/VP8L/VP8X payloads — they're the compressed image.
+        offset = payload_end + (size & 1)  # RIFF aligns chunks to even boundaries
+    analysis.decoded_text_sample = "\n".join(decoded_parts)[:_MAX_DECODED_TEXT]
+    return analysis
+
+
+def _parse_gif(data: bytes) -> MediaAnalysis:
+    """Parse a GIF file for comment and application extension text.
+
+    GIF extension blocks are introduced by 0x21, followed by a label
+    byte (0xFE for comment, 0xFF for application), then a series of
+    sub-blocks. Each sub-block is `len` bytes (1-byte length, then
+    `len` bytes of data) and the chain ends with a zero-length block.
+    We collect every sub-block payload — generation tools sometimes
+    stash parameters here.
+    """
+    analysis = _empty(MediaFormat.GIF, len(data))
+    if not data.startswith(b"GIF87a") and not data.startswith(b"GIF89a"):
+        analysis.parse_status = "malformed"
+        analysis.parse_warning = "GIF magic header missing."
+        return analysis
+    offset = 13  # GIF header is 6 (sig) + 7 (LSD) bytes
+    decoded_parts: list[str] = []
+    # Skip the Global Color Table if present.
+    if offset - 1 < len(data):
+        packed = data[10]
+        if packed & 0x80:
+            gct_size = 3 * (1 << ((packed & 0x07) + 1))
+            offset += gct_size
+    while offset < len(data):
+        byte = data[offset]
+        if byte == 0x3B:  # trailer
+            break
+        if byte == 0x21:  # extension block
+            if offset + 2 >= len(data):
+                analysis.parse_status = "malformed"
+                analysis.parse_warning = "Truncated GIF extension header."
+                break
+            label = data[offset + 1]
+            offset += 2
+            collected: list[bytes] = []
+            while offset < len(data):
+                length = data[offset]
+                offset += 1
+                if length == 0:
+                    break
+                collected.append(data[offset : offset + length])
+                offset += length
+            block_text = b"".join(collected).decode("latin-1", errors="replace")
+            if label == 0xFE:
+                analysis.generative_metadata_keys.append("GIF comment")
+                decoded_parts.append(block_text)
+            elif label == 0xFF:
+                analysis.generative_metadata_keys.append("GIF application extension")
+                decoded_parts.append(block_text)
+            # Other labels (graphic control, plain text) are skipped.
+        elif byte == 0x2C:  # image descriptor — skip to next block
+            # Image descriptor is 10 bytes, then optional Local Color
+            # Table, then sub-block-encoded LZW data. Walk to the
+            # zero-length terminator without trying to interpret it.
+            offset += 10
+            # Skip LCT if present.
+            if offset - 1 < len(data):
+                lcd_packed = data[offset - 1]
+                if lcd_packed & 0x80:
+                    lct_size = 3 * (1 << ((lcd_packed & 0x07) + 1))
+                    offset += lct_size
+            # Skip LZW minimum code size byte.
+            if offset < len(data):
+                offset += 1
+            while offset < len(data):
+                length = data[offset]
+                offset += 1
+                if length == 0:
+                    break
+                offset += length
+        else:
+            # Unknown block — abort to avoid infinite loop on garbage.
+            analysis.parse_status = "malformed"
+            analysis.parse_warning = f"Unknown GIF block byte 0x{byte:02x} at offset {offset}."
+            break
+    analysis.decoded_text_sample = "\n".join(decoded_parts)[:_MAX_DECODED_TEXT]
+    return analysis
+
+
 def analyze_media(data: bytes) -> MediaAnalysis:
     """Parse `data` and return a MediaAnalysis. Never raises on malformed input."""
     if not data:
         return _empty()
+    fmt = detect_format(data)
     try:
-        fmt = detect_format(data)
         if fmt == MediaFormat.PNG:
             analysis = _parse_png(data)
         elif fmt == MediaFormat.JPEG:
             analysis = _parse_jpeg(data)
         elif fmt in (MediaFormat.MP4, MediaFormat.MOV, MediaFormat.HEIC, MediaFormat.AVIF):
             analysis = _parse_isobmff(data, fmt)
+        elif fmt == MediaFormat.WEBP:
+            analysis = _parse_webp(data)
+        elif fmt == MediaFormat.GIF:
+            analysis = _parse_gif(data)
         else:
             analysis = _empty(fmt, len(data))
+            analysis.parse_status = "unsupported"
+            analysis.parse_warning = (
+                "File format was not recognized by any bundled parser. "
+                "Magic bytes did not match PNG, JPEG, WebP, GIF, HEIC, AVIF, MP4, or MOV."
+            )
         _enrich_with_fingerprints(analysis)
         _score_and_classify(analysis)
         return analysis
-    except Exception:
+    except Exception as error:
         # Honest failure: the caller treats absence of findings as "no
-        # signal". Raising would hide that we lost information.
-        analysis = _empty(MediaFormat.UNKNOWN, len(data))
+        # signal", but the parse_warning surfaces that we lost information.
+        analysis = _empty(fmt, len(data))
+        analysis.parse_status = "parser_error"
+        analysis.parse_warning = f"{type(error).__name__}: {error}"[:240]
         _score_and_classify(analysis)
         return analysis

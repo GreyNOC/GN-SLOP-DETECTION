@@ -75,11 +75,11 @@
             <strong id="scoreMetric">0.000</strong>
           </article>
           <article class="metric-card">
-            <span>Words</span>
+            <span id="wordMetricLabel">Words</span>
             <strong id="wordMetric">0</strong>
           </article>
           <article class="metric-card">
-            <span>Signals</span>
+            <span id="signalMetricLabel">Signals</span>
             <strong id="signalMetric">0</strong>
           </article>
         </section>
@@ -192,6 +192,14 @@
                 </div>
               </div>
 
+              <label class="field-label" for="codeIncludeInput">Include (comma-separated globs, optional)</label>
+              <input
+                class="source-input"
+                id="codeIncludeInput"
+                type="text"
+                placeholder="src/**/*.py, app/**"
+              />
+
               <label class="field-label" for="codeExcludeInput">Exclude (comma-separated globs, optional)</label>
               <input
                 class="source-input"
@@ -303,6 +311,24 @@
               <h2>Detected Signals</h2>
             </div>
             <div class="panel-actions" id="findingsActions" hidden>
+              <select id="findingsSeverityFilter" class="source-input inline-filter" aria-label="Severity filter">
+                <option value="">All severities</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+                <option value="info">Info</option>
+              </select>
+              <select id="findingsCategoryFilter" class="source-input inline-filter" aria-label="Category filter">
+                <option value="">All categories</option>
+              </select>
+              <input
+                id="findingsTextFilter"
+                class="source-input inline-filter"
+                type="search"
+                placeholder="filter text…"
+                aria-label="Text filter"
+              />
               <button
                 class="icon-button"
                 id="expandAllButton"
@@ -313,15 +339,33 @@
                 Expand all
               </button>
               <button
+                class="icon-button"
+                id="downloadJsonButton"
+                type="button"
+                title="Download the raw scan payload as JSON."
+              >
+                JSON
+              </button>
+              <button
+                class="icon-button"
+                id="downloadSarifButton"
+                type="button"
+                title="Download SARIF v2.1.0 for GitHub Code Scanning / VS Code Problems pane."
+              >
+                SARIF
+              </button>
+              <button
                 class="primary-button"
                 id="downloadReportButton"
                 type="button"
                 title="Download a self-contained HTML report including every finding, its probe (offending code snippet), and its suggested fix."
               >
-                Download Full Report
+                Full Report
               </button>
             </div>
           </div>
+
+          <div id="findingsBanner" class="findings-banner" hidden></div>
 
           <div class="table-wrap">
             <table>

@@ -8,12 +8,20 @@ from statistics import mean, pstdev
 
 
 @dataclass(frozen=True)
+class SignalMatch:
+    term: str
+    excerpt: str
+    line: int | None = None
+
+
+@dataclass(frozen=True)
 class DetectionSignal:
     name: str
     category: str
     weight: float
     count: int
     description: str
+    matches: tuple[SignalMatch, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -46,6 +54,9 @@ class DetectionResult:
     dimensions: list[AnalysisDimension]
     profile: ContentProfile
     recommendation: str
+    content_profile: str = "general"
+    sample_quality: str = "medium"
+    confidence: float = 1.0
 
 
 EM_DASH = "—"
@@ -93,6 +104,75 @@ STOPWORDS = frozenset({
 })
 
 
+_VALID_PROFILES = ("general", "soc", "marketing", "academic", "support")
+
+# Profile-specific multipliers applied to specific signal categories.
+# A multiplier of 1.0 keeps the default weight; <1.0 softens; >1.0
+# sharpens. Multipliers are deliberately conservative so a profile
+# never silences a signal entirely.
+_PROFILE_MULTIPLIERS: dict[str, dict[str, float]] = {
+    "general": {},
+    "soc": {
+        # SOC notes use compressed technical phrasing; vague-language
+        # hits there are usually false positives.
+        "vague_language": 0.55,
+        "filler_phrases": 0.65,
+        "long_sentences": 0.5,
+    },
+    "marketing": {
+        # Marketing copy will always use some promotional language;
+        # don't punish it twice, but keep the unsupported-claims
+        # penalty intact.
+        "vague_language": 0.5,
+        "seo_or_clickbait_phrases": 0.5,
+        # Still flag the bigger lies hard.
+        "unsupported_claims": 1.0,
+        "unsupported_claim_phrases": 1.0,
+    },
+    "academic": {
+        # Academic writing rewards citations; soften the AI-template
+        # signal because formal prose is allowed to be formulaic.
+        "template_or_ai_scars": 0.7,
+    },
+    "support": {
+        # Support tickets are conversational; long sentences and
+        # transitions are normal.
+        "long_sentences": 0.6,
+        "transition_word_stuffing": 0.7,
+    },
+}
+
+# Concrete-detail patterns used by the upgraded specificity calculator.
+# Each hit advances the "this text contains specifics" counter and is
+# also surfaced as a signal match excerpt.
+_SPECIFICITY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("ip", re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")),
+    ("ipv6", re.compile(r"\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b", re.IGNORECASE)),
+    ("port", re.compile(r"\b(?:port|tcp|udp)\s*[:#]?\s*\d{1,5}\b", re.IGNORECASE)),
+    ("cve", re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)),
+    ("hash", re.compile(r"\b[0-9a-f]{40}\b|\b[0-9a-f]{64}\b", re.IGNORECASE)),
+    ("date", re.compile(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b|\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")),
+    (
+        "domain",
+        re.compile(
+            r"\b[a-z0-9][a-z0-9\-]+\.(?:com|org|net|io|ai|dev|gov|edu|uk|de|fr|jp|cn|au|ca)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("url", re.compile(r"https?://\S+")),
+    ("file_path", re.compile(r"(?:^|\s)/(?:[\w\-./]+)|\b[A-Za-z]:\\[\w\-\\.]+")),
+    ("version", re.compile(r"\bv?\d+\.\d+(?:\.\d+){0,2}\b")),
+    ("ticket", re.compile(r"\b(?:[A-Z]{2,8}-\d{3,6}|#\d{3,6})\b")),
+    (
+        "measurement",
+        re.compile(
+            r"\b\d+(?:\.\d+)?\s*(?:ms|s|min|h|hour|hours|day|days|MB|GB|TB|KB|kbps|mbps|gbps|%)\b",
+            re.IGNORECASE,
+        ),
+    ),
+]
+
+
 class SlopDetector:
     """Explainable rule-based slop detector.
 
@@ -100,7 +180,7 @@ class SlopDetector:
     it scores signs of weak, repetitive, generic, or unsupported content.
     """
 
-    ALGORITHM_VERSION = "rule-picture-v3"
+    ALGORITHM_VERSION = "rule-picture-v4"
 
     VAGUE_TERMS = frozenset({
         "revolutionary", "cutting-edge", "game-changing", "next-generation",
@@ -173,7 +253,9 @@ class SlopDetector:
     MIN_WORDS_FOR_TTR = 80
     TTR_FLAG_THRESHOLD = 0.45
 
-    def analyze(self, text: str) -> DetectionResult:
+    def analyze(self, text: str, profile: str = "general") -> DetectionResult:
+        if profile not in _VALID_PROFILES:
+            profile = "general"
         raw = text or ""
         # The em-dash signal is calculated against the original text because
         # _normalize_for_matching rewrites dashes to spaces for phrase matching.
@@ -295,7 +377,9 @@ class SlopDetector:
                 )
             )
 
-        specificity_ratio = self._specificity_ratio(cased_tokens, words)
+        specificity_ratio, _specificity_matches = self._specificity_ratio_v2(
+            cased_tokens, words, raw
+        )
         if word_count >= 40 and specificity_ratio < 0.10:
             signals.append(
                 DetectionSignal(
@@ -311,6 +395,23 @@ class SlopDetector:
                 DetectionSignal(
                     "evidence_gap", "evidence", 0.18, 1,
                     "Claims are present but dates, links, citations, or measurements are sparse",
+                )
+            )
+
+        # Claim-to-evidence proximity. A sentence that asserts something
+        # strong should sit next to a link / number / citation / named
+        # entity. If a majority of claim sentences are bare, treat that
+        # as a separate, weaker signal than the bulk evidence_density
+        # hit above.
+        unsupported_claim_sentences = self._unsupported_claim_sentences(sentences)
+        if word_count >= 50 and unsupported_claim_sentences >= max(2, len(sentences) // 4):
+            signals.append(
+                DetectionSignal(
+                    "unsupported_claim_sentences",
+                    "evidence",
+                    0.14,
+                    unsupported_claim_sentences,
+                    "Several claim sentences lack any nearby evidence anchor",
                 )
             )
 
@@ -341,8 +442,31 @@ class SlopDetector:
                 )
             )
 
+        # Apply profile-specific weight multipliers. Hits are rewritten,
+        # not dropped, so the dashboard still surfaces them — they just
+        # contribute less / more to the composite score.
+        multipliers = _PROFILE_MULTIPLIERS.get(profile, {})
+        if multipliers:
+            adjusted: list[DetectionSignal] = []
+            for signal in signals:
+                multiplier = multipliers.get(signal.name, 1.0)
+                if multiplier == 1.0:
+                    adjusted.append(signal)
+                    continue
+                adjusted.append(
+                    DetectionSignal(
+                        signal.name,
+                        signal.category,
+                        round(signal.weight * multiplier, 4),
+                        signal.count,
+                        signal.description,
+                        signal.matches,
+                    )
+                )
+            signals = adjusted
+
         repetition_density = self._repetition_density(words)
-        profile = ContentProfile(
+        profile_content = ContentProfile(
             algorithm=self.ALGORITHM_VERSION,
             sentence_count=len(sentences),
             average_sentence_length=round(mean(sentence_lengths), 2) if sentence_lengths else 0.0,
@@ -355,16 +479,20 @@ class SlopDetector:
         )
         score = self._score(signals, word_count)
         risk = self._risk(score)
-        dimensions = self._dimensions(signals, profile)
+        dimensions = self._dimensions(signals, profile_content)
         recommendation = self._recommendation(risk, dimensions)
+        sample_quality, confidence = self._sample_quality(word_count)
         return DetectionResult(
             score=score,
             risk=risk,
             word_count=word_count,
             signals=signals,
             dimensions=dimensions,
-            profile=profile,
+            profile=profile_content,
             recommendation=recommendation,
+            content_profile=profile,
+            sample_quality=sample_quality,
+            confidence=confidence,
         )
 
     def _normalize_for_matching(self, text: str) -> str:
@@ -385,10 +513,16 @@ class SlopDetector:
         weight: float,
         description: str,
     ) -> list[DetectionSignal]:
-        counts = sum(1 for word in words if word in terms)
-        if counts == 0:
+        hits: list[str] = []
+        for word in words:
+            if word in terms:
+                hits.append(word)
+        if not hits:
             return []
-        return [DetectionSignal(name, category, weight, counts, description)]
+        matches = tuple(
+            SignalMatch(term=term, excerpt=term) for term in list(dict.fromkeys(hits))[:8]
+        )
+        return [DetectionSignal(name, category, weight, len(hits), description, matches)]
 
     def _phrase_signal(
         self,
@@ -399,10 +533,22 @@ class SlopDetector:
         weight: float,
         description: str,
     ) -> list[DetectionSignal]:
-        counts = sum(text.count(phrase) for phrase in phrases)
-        if counts == 0:
+        total = 0
+        match_list: list[SignalMatch] = []
+        for phrase in phrases:
+            occurrences = text.count(phrase)
+            if not occurrences:
+                continue
+            total += occurrences
+            if len(match_list) < 8:
+                index = text.find(phrase)
+                start = max(0, index - 24)
+                end = min(len(text), index + len(phrase) + 24)
+                excerpt = re.sub(r"\s+", " ", text[start:end]).strip()
+                match_list.append(SignalMatch(term=phrase, excerpt=excerpt[:160]))
+        if not total:
             return []
-        return [DetectionSignal(name, category, weight, counts, description)]
+        return [DetectionSignal(name, category, weight, total, description, tuple(match_list))]
 
     def _repetition_count(self, words: list[str]) -> int:
         meaningful = [word for word in words if len(word) > 4 and word not in STOPWORDS]
@@ -419,6 +565,88 @@ class SlopDetector:
 
     def _sentences(self, text: str) -> list[str]:
         return [segment.strip() for segment in SENTENCE_SPLIT_RE.split(text) if segment.strip()]
+
+    def _specificity_ratio_v2(
+        self,
+        cased_tokens: list[str],
+        words: list[str],
+        raw: str,
+    ) -> tuple[float, tuple[SignalMatch, ...]]:
+        """New specificity scorer.
+
+        Builds a denominator from word tokens. The numerator counts:
+          - tokens that contain a digit
+          - tokens that are CamelCase / acronyms
+          - matches of the concrete-detail patterns (IPs, CVEs, ports,
+            URLs, file paths, versions, ticket ids, measurements, etc.)
+        Each concrete pattern match is also captured as a SignalMatch
+        excerpt for the dashboard.
+        """
+        if not words:
+            return 0.0, ()
+        concrete = 0
+        for token_cased, token_lower in zip(cased_tokens, words, strict=True):
+            if any(ch.isdigit() for ch in token_lower):
+                concrete += 1
+                continue
+            if (
+                len(token_cased) >= 2
+                and token_cased[0].isupper()
+                and any(ch.isupper() for ch in token_cased[1:])
+            ):
+                concrete += 1
+        matches: list[SignalMatch] = []
+        for kind, pattern in _SPECIFICITY_PATTERNS:
+            for match in pattern.finditer(raw):
+                concrete += 1
+                if len(matches) < 12:
+                    start = max(0, match.start() - 24)
+                    end = min(len(raw), match.end() + 24)
+                    excerpt = re.sub(r"\s+", " ", raw[start:end]).strip()
+                    matches.append(SignalMatch(term=kind, excerpt=excerpt[:120]))
+                if len(matches) >= 64:
+                    break
+        return concrete / len(words), tuple(matches)
+
+    def _unsupported_claim_sentences(self, sentences: list[str]) -> int:
+        """Count sentences that look like claims but lack nearby evidence.
+
+        "Claim" here is a heuristic: the sentence contains a claim verb
+        or unsupported claim adjective. "Evidence" means the same
+        sentence or its immediate neighbours include a number, URL,
+        citation marker, date, named org (capitalized 2+ word phrase),
+        CVE, or measurement.
+        """
+        if not sentences:
+            return 0
+        claim_re = re.compile(
+            r"\b(?:" + "|".join(re.escape(w) for w in (self.CLAIM_VERBS | self.UNSUPPORTED_CLAIMS)) + r")\b",
+            re.IGNORECASE,
+        )
+        evidence_re = re.compile(
+            r"\b\d|https?://|CVE-\d{4}-\d|doi:|\[\d+\]|\([A-Z][a-z]+,\s*\d{4}\)|"
+            r"\b[A-Z][a-zA-Z]+\s[A-Z][a-zA-Z]+\b",
+        )
+        bare = 0
+        for index, sentence in enumerate(sentences):
+            if not claim_re.search(sentence):
+                continue
+            # Look at this sentence + neighbour for any evidence anchor.
+            window = sentence
+            if index + 1 < len(sentences):
+                window += " " + sentences[index + 1]
+            if index - 1 >= 0:
+                window = sentences[index - 1] + " " + window
+            if not evidence_re.search(window):
+                bare += 1
+        return bare
+
+    def _sample_quality(self, word_count: int) -> tuple[str, float]:
+        if word_count < 30:
+            return "low", 0.45
+        if word_count < 150:
+            return "medium", 0.75
+        return "high", 1.0
 
     def _specificity_ratio(self, cased_tokens: list[str], words: list[str]) -> float:
         if not words:

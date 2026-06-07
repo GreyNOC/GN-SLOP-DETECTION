@@ -12,6 +12,10 @@ class ScanSource:
         self.target = target
         self._root: Path | None = None
         self.git_metadata: dict[str, str] = {}
+        # Set by LocalPathSource when a single-file target is detected.
+        # The orchestrator uses it to constrain include_globs so a
+        # file-shaped target doesn't pull in the rest of its directory.
+        self.single_file_relative: str | None = None
 
     @property
     def root(self) -> Path:

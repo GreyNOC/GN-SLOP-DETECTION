@@ -223,6 +223,34 @@ button.nav-item {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.inline-filter {
+  height: 32px !important;
+  width: auto !important;
+  min-width: 120px;
+  margin-bottom: 0 !important;
+  padding: 0 8px !important;
+  font-size: 0.85rem;
+}
+
+.findings-banner {
+  margin: 0 18px 12px 18px;
+  padding: 10px 12px;
+  background: rgba(240, 180, 41, 0.12);
+  border: 1px solid var(--amber);
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.findings-banner.error {
+  background: rgba(255, 93, 93, 0.16);
+  border-color: var(--red);
+}
+
+.finding-row[hidden] {
+  display: none !important;
 }
 
 .finding-row {
