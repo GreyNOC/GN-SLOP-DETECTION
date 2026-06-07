@@ -101,6 +101,9 @@ class ScanResult:
     skipped_examples: list[str] = field(default_factory=list)
     git_metadata: dict[str, str] = field(default_factory=dict)
     llm_verifications: dict[str, LlmVerification] = field(default_factory=dict)
+    redacted_findings: set[str] = field(default_factory=set)
+    suppressed_count: int = 0
+    rule_errors: list[dict[str, str]] = field(default_factory=list)
     score: float = 0.0
     risk: str = "low"
     recommendation: str = ""
@@ -118,8 +121,22 @@ class ScanResult:
 
         denominator = max(1.0, math.sqrt(self.files_scanned))
         raw = sum(finding_score(f.severity, f.confidence) for f in self.findings) / denominator
-        # Hard cap critical findings: even one critical pushes the
-        # composite past the "review now" threshold.
+        # Severity / category floors. A single high-confidence secret or
+        # critical backdoor / CI exfil pushes the composite into high
+        # risk regardless of how many clean files dilute the average.
+        for finding in self.findings:
+            if (
+                finding.severity in (Severity.HIGH, Severity.CRITICAL)
+                and finding.confidence == Confidence.HIGH
+                and finding.rule_id.startswith("secret.")
+            ):
+                raw = max(raw, 0.70)
+            if finding.severity == Severity.CRITICAL and finding.category in (
+                "backdoor",
+                "ci",
+            ):
+                raw = max(raw, 0.70)
+        # Any critical finding at all still floors at 0.65.
         if any(f.severity == Severity.CRITICAL for f in self.findings):
             raw = max(raw, 0.65)
         self.score = round(min(raw, 1.0), 3)

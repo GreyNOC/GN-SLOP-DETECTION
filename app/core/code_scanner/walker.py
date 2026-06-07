@@ -14,7 +14,7 @@ numbers remain trustworthy.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
@@ -75,39 +75,13 @@ _SKIP_EXTENSIONS: Final = frozenset(
     }
 )
 
-# Text extensions we explicitly recognize. The walker still ingests
-# unknown text-shaped extensions (we read a probe and decode), but
-# anything in this set is processed with no extra checks.
-_TEXT_EXTENSIONS: Final = frozenset(
-    {
-        ".py", ".pyx", ".pyi",
-        ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
-        ".sh", ".bash", ".zsh", ".fish", ".ksh",
-        ".yml", ".yaml",
-        ".toml", ".ini", ".cfg", ".conf",
-        ".json", ".json5",
-        ".go",
-        ".rs",
-        ".java", ".kt", ".kts",
-        ".c", ".h", ".cc", ".cpp", ".hpp", ".cxx", ".hh",
-        ".cs", ".fs",
-        ".rb", ".erb",
-        ".php", ".phtml",
-        ".swift", ".m", ".mm",
-        ".lua",
-        ".sql",
-        ".html", ".htm", ".xml", ".svg",
-        ".md", ".rst", ".txt",
-        ".env", ".envrc",
-        ".dockerfile", ".containerfile",
-        ".tf", ".tfvars",
-        ".gradle",
-        ".pl", ".pm",
-    }
-)
-
 # Bytes of a file we probe to decide whether the rest is plausibly text.
 _PROBE_BYTES: Final = 4096
+
+# Cap the skipped-examples list so a huge tree with thousands of skipped
+# files doesn't bloat the response. The true skip count is tracked
+# separately so the analyst still sees the right number.
+_SKIPPED_EXAMPLES_CAP: Final = 20
 
 
 # Dotted directories that carry high-signal scan targets (CI workflows
@@ -148,7 +122,7 @@ def _matches_any(path: str, globs: Iterable[str]) -> bool:
     return any(fnmatch(path, pattern) for pattern in globs)
 
 
-def walk_tree(
+def walk_collect(
     root: Path,
     *,
     max_bytes_per_file: int,
@@ -156,22 +130,35 @@ def walk_tree(
     max_files: int,
     include_globs: tuple[str, ...] = (),
     exclude_globs: tuple[str, ...] = (),
-) -> Iterator[WalkedFile]:
-    """Yield text files under `root`.
+) -> tuple[list[WalkedFile], WalkStats]:
+    """Walk ``root`` and return (files, stats).
 
-    The walker tracks byte / file counts via the stats dict
-    placeholder returned through `walk_stats`, but to keep the API
-    streaming the stats are exposed through `walk_collect` below.
+    Both the streamed iterator and stats live in this single function
+    now; the previous version stored stats on a function attribute,
+    which made ``files_skipped`` reflect only the displayed examples
+    and not the true count. Here we maintain a true ``files_skipped``
+    counter alongside a capped examples list.
     """
     root = root.resolve()
-    if not root.is_dir():
-        return
-
+    files: list[WalkedFile] = []
     skipped_examples: list[str] = []
+    files_skipped = 0
     total_bytes = 0
     file_count = 0
 
+    def _record_skip(relative: str, reason: str) -> None:
+        nonlocal files_skipped
+        files_skipped += 1
+        if len(skipped_examples) < _SKIPPED_EXAMPLES_CAP:
+            skipped_examples.append(f"{relative} ({reason})")
+
+    if not root.is_dir():
+        return files, WalkStats(0, 0, 0, [])
+
+    halted = False
     for current_dir, dirnames, filenames in os.walk(root):
+        if halted:
+            break
         # In-place mutation of dirnames prunes the os.walk descent.
         dirnames[:] = [
             d
@@ -187,43 +174,45 @@ def walk_tree(
                 continue
             suffix = absolute.suffix.lower()
             if suffix in _SKIP_EXTENSIONS:
-                if len(skipped_examples) < 20:
-                    skipped_examples.append(f"{relative} (binary extension)")
+                _record_skip(relative, "binary extension")
                 continue
             if include_globs and not _matches_any(relative, include_globs):
+                # Not a skip we want to count — include_globs are an
+                # explicit allowlist; everything outside is "not
+                # targeted", not "skipped for cause".
                 continue
             if exclude_globs and _matches_any(relative, exclude_globs):
+                _record_skip(relative, "exclude_globs")
                 continue
 
             try:
                 size = absolute.stat().st_size
             except OSError:
+                _record_skip(relative, "stat failed")
                 continue
             if size <= 0:
                 continue
             if size > max_bytes_per_file:
-                if len(skipped_examples) < 20:
-                    skipped_examples.append(f"{relative} (too large: {size} bytes)")
+                _record_skip(relative, f"too large: {size} bytes")
                 continue
             if total_bytes + size > max_total_bytes:
-                if len(skipped_examples) < 20:
-                    skipped_examples.append(f"{relative} (total byte cap reached)")
+                _record_skip(relative, "total byte cap reached")
                 continue
             if file_count >= max_files:
-                if len(skipped_examples) < 20:
-                    skipped_examples.append(f"{relative} (max file count reached)")
-                return
+                _record_skip(relative, "max file count reached")
+                halted = True
+                break
 
             try:
                 with absolute.open("rb") as handle:
                     probe = handle.read(_PROBE_BYTES)
                     if not _is_probably_text(probe):
-                        if len(skipped_examples) < 20:
-                            skipped_examples.append(f"{relative} (binary content)")
+                        _record_skip(relative, "binary content")
                         continue
                     rest = handle.read()
                 raw = probe + rest
             except OSError:
+                _record_skip(relative, "read failed")
                 continue
 
             try:
@@ -238,45 +227,21 @@ def walk_tree(
             file_count += 1
             total_bytes += size
 
-            yield WalkedFile(
-                relative_path=relative,
-                absolute_path=absolute,
-                text=text,
-                byte_size=size,
+            files.append(
+                WalkedFile(
+                    relative_path=relative,
+                    absolute_path=absolute,
+                    text=text,
+                    byte_size=size,
+                )
             )
 
-    # Attach a final stats record on the generator via attribute. The
-    # collect helper below picks this up.
-    walk_tree._last_stats = WalkStats(  # type: ignore[attr-defined]
+    return files, WalkStats(
         files_scanned=file_count,
-        files_skipped=len(skipped_examples),
+        files_skipped=files_skipped,
         bytes_scanned=total_bytes,
         skipped_examples=skipped_examples,
     )
-
-
-def walk_collect(
-    root: Path,
-    *,
-    max_bytes_per_file: int,
-    max_total_bytes: int,
-    max_files: int,
-    include_globs: tuple[str, ...] = (),
-    exclude_globs: tuple[str, ...] = (),
-) -> tuple[list[WalkedFile], WalkStats]:
-    """Convenience wrapper that materializes the walk and returns stats."""
-    files = list(
-        walk_tree(
-            root,
-            max_bytes_per_file=max_bytes_per_file,
-            max_total_bytes=max_total_bytes,
-            max_files=max_files,
-            include_globs=include_globs,
-            exclude_globs=exclude_globs,
-        )
-    )
-    stats = getattr(walk_tree, "_last_stats", WalkStats(0, 0, 0, []))
-    return files, stats
 
 
 def detect_language(path: str) -> str:
@@ -309,5 +274,4 @@ __all__ = [
     "WalkedFile",
     "detect_language",
     "walk_collect",
-    "walk_tree",
 ]

@@ -38,6 +38,7 @@ from app.models.schemas import (
     MediaAnalysisResponse,
     MediaFinding,
     Signal,
+    SignalMatch,
     WebsiteMetadata,
 )
 
@@ -45,23 +46,40 @@ router = APIRouter(prefix="/api/v1", tags=["analysis"])
 detector = SlopDetector()
 
 
+def _signal_to_pydantic(signal) -> Signal:
+    return Signal(
+        name=signal.name,
+        category=signal.category,
+        weight=signal.weight,
+        count=signal.count,
+        description=signal.description,
+        matches=[
+            SignalMatch(term=match.term, excerpt=match.excerpt, line=match.line)
+            for match in (signal.matches or ())
+        ],
+    )
+
+
 def to_response(
     request: AnalyzeRequest,
     input_type: str = "text",
     website: WebsiteMetadata | None = None,
 ) -> AnalyzeResponse:
-    result = detector.analyze(request.text)
+    result = detector.analyze(request.text, profile=getattr(request, "profile", "general"))
     return AnalyzeResponse(
         source=request.source,
         input_type=input_type,
         score=result.score,
         risk=result.risk,
         word_count=result.word_count,
-        signals=[Signal(**signal.__dict__) for signal in result.signals],
+        signals=[_signal_to_pydantic(signal) for signal in result.signals],
         dimensions=[Dimension(**dimension.__dict__) for dimension in result.dimensions],
         profile=ContentProfile(**result.profile.__dict__),
         website=website,
         recommendation=result.recommendation,
+        content_profile=result.content_profile,
+        sample_quality=result.sample_quality,
+        confidence=result.confidence,
     )
 
 
@@ -84,9 +102,20 @@ def analyze_url(request: AnalyzeUrlRequest) -> AnalyzeResponse:
         status_code=fetched.status_code,
         content_type=fetched.content_type,
         byte_count=fetched.byte_count,
+        redirect_count=fetched.redirect_count,
+        redirect_chain=list(fetched.redirect_chain),
+        extraction_text_length=fetched.extraction_text_length,
+        content_hash=fetched.content_hash,
+        meta_description=fetched.meta_description,
+        open_graph_title=fetched.open_graph_title,
+        open_graph_description=fetched.open_graph_description,
     )
     return to_response(
-        AnalyzeRequest(text=fetched.text, source=request.source or fetched.title or fetched.final_url),
+        AnalyzeRequest(
+            text=fetched.text,
+            source=request.source or fetched.title or fetched.final_url,
+            profile=getattr(request, "profile", "general"),
+        ),
         input_type="website",
         website=website,
     )
@@ -142,10 +171,18 @@ async def analyze_media_upload(
         tool_fingerprints=list(analysis.tool_fingerprints),
         findings=[MediaFinding(**asdict(finding)) for finding in analysis.findings],
         recommendation=analysis.recommendation,
+        parse_status=analysis.parse_status,
+        parse_warning=analysis.parse_warning,
     )
 
 
-def _finding_to_response(finding: Finding) -> CodeFindingResponse:
+def _finding_to_response(
+    finding: Finding,
+    *,
+    redacted: bool = False,
+    llm_verdict: str | None = None,
+    llm_rationale: str | None = None,
+) -> CodeFindingResponse:
     return CodeFindingResponse(
         rule_id=finding.rule_id,
         title=finding.title,
@@ -158,6 +195,9 @@ def _finding_to_response(finding: Finding) -> CodeFindingResponse:
         line_end=finding.line_end,
         snippet=finding.snippet,
         remediation=finding.remediation,
+        redacted=redacted,
+        llm_verdict=llm_verdict,
+        llm_rationale=llm_rationale,
     )
 
 
@@ -165,6 +205,19 @@ def _scan_result_to_response(result: ScanResult) -> CodeScanResponse:
     counts: Counter[str] = Counter()
     for finding in result.findings:
         counts[finding.severity.value] += 1
+    finding_responses: list[CodeFindingResponse] = []
+    for finding in result.findings:
+        key = f"{finding.rule_id}@{finding.file_path}:{finding.line_start}"
+        redacted = key in result.redacted_findings
+        verification = result.llm_verifications.get(key)
+        finding_responses.append(
+            _finding_to_response(
+                finding,
+                redacted=redacted,
+                llm_verdict=verification.verdict if verification else None,
+                llm_rationale=verification.rationale if verification else None,
+            )
+        )
     return CodeScanResponse(
         target=result.target,
         target_type=result.target_type.value,
@@ -173,13 +226,17 @@ def _scan_result_to_response(result: ScanResult) -> CodeScanResponse:
         files_skipped=result.files_skipped,
         bytes_scanned=result.bytes_scanned,
         elapsed_seconds=result.elapsed_seconds,
-        findings=[_finding_to_response(f) for f in result.findings],
+        findings=finding_responses,
         skipped_examples=list(result.skipped_examples),
         git_metadata=dict(result.git_metadata),
         score=result.score,
         risk=result.risk,
         recommendation=result.recommendation,
         finding_counts={severity: counts.get(severity, 0) for severity in (s.value for s in Severity)},
+        total_findings=len(result.findings),
+        suppressed_count=result.suppressed_count,
+        rule_errors=list(result.rule_errors),
+        redactions_present=bool(result.redacted_findings),
     )
 
 
@@ -287,7 +344,9 @@ async def scan_code_upload(
     file: UploadFile = File(  # noqa: B008
         ..., description="Archive (.zip / .tar.gz / .tgz) of a code tree to scan."
     ),
-    include_globs: str | None = Form(default=None),  # noqa: B008
+    include_globs: str | None = Form(  # noqa: B008
+        default=None, description="Comma-separated fnmatch globs to restrict the scan."
+    ),
     exclude_globs: str | None = Form(default=None),  # noqa: B008
 ) -> CodeScanResponse:
     suffix = (file.filename or "").lower()

@@ -21,7 +21,7 @@ def test_detector_returns_complete_slop_picture():
         "It is important to note that the solution is revolutionary and dynamic."
     )
     result = SlopDetector().analyze(text)
-    assert result.profile.algorithm == "rule-picture-v3"
+    assert result.profile.algorithm == "rule-picture-v4"
     assert result.dimensions
     assert {dimension.name for dimension in result.dimensions} >= {"Clarity", "Evidence", "Specificity"}
     assert all(0.0 <= dimension.score <= 1.0 for dimension in result.dimensions)
