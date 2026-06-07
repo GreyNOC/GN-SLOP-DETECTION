@@ -160,6 +160,65 @@ button.nav-item {
   font-size: 0.82rem;
 }
 
+/* Accessible-but-visually-hidden helper used to wrap a real
+   <input type="file"> behind a styled <label> that triggers it. Using
+   display: none breaks the label-click association in some Electron
+   sandbox modes; this pattern keeps the input in the accessibility
+   tree and reliably opens the OS picker when its label is clicked. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.file-picker {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 6px 6px 6px 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-soft);
+}
+
+.file-picker-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 14px;
+  background: var(--blue);
+  color: var(--ink);
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+}
+
+.file-picker-button:hover,
+.file-picker-button:focus-within {
+  filter: brightness(1.08);
+}
+
+.visually-hidden:focus-visible + .file-picker-button {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.file-picker-name {
+  color: var(--muted-strong);
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
 .panel-actions {
   display: flex;
   align-items: center;
