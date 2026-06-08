@@ -20,10 +20,6 @@ from app.core.code_scanner.suppression import is_suppressed
 from app.core.code_scanner.walker import detect_language, walk_collect
 from app.core.settings import get_settings
 
-
-class ScanTargetForbidden(PermissionError):
-    """Raised when a scan target falls outside the configured base path."""
-
 ALGORITHM_VERSION = "code-picture-v2"
 
 
@@ -33,22 +29,6 @@ def scan_target(request: ScanRequest) -> ScanResult:
     source = resolve_source(request)
     try:
         root: Path = source.root
-
-        # Optional containment: refuse to scan anywhere outside the
-        # configured base path. The default empty string keeps the
-        # behaviour the local CLI / Electron user expects; deployments
-        # set CODE_SCAN_BASE_PATH to lock the API down.
-        base = get_settings().code_scan_base_path
-        if base and request.target_type == ScanTargetType.PATH:
-            base_path = Path(base).expanduser().resolve()
-            resolved_root = root.resolve()
-            if not (
-                resolved_root == base_path
-                or resolved_root.is_relative_to(base_path)
-            ):
-                raise ScanTargetForbidden(
-                    f"Scan target {resolved_root} is outside the configured base path {base_path}."
-                )
 
         # When a LocalPathSource resolved a *file* target we narrow the
         # walker to that single file via include_globs. This stops
