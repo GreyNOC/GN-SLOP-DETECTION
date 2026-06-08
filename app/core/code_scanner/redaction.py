@@ -118,42 +118,44 @@ def _redact_text(text: str) -> tuple[str, bool]:
 
 
 def redact_finding_snippets(findings: list[Finding]) -> tuple[list[Finding], dict[str, bool]]:
-    """Return a new list of findings whose secret snippets are redacted.
+    """Return a new list of findings whose snippets are redacted.
 
-    Also returns a dict keyed by the finding's identity (rule_id +
-    file_path + line_start) → True when that finding was redacted.
-    The orchestrator uses this map to set ``redacted=True`` on the
+    We run the secret-value patterns over *every* finding's snippet, not
+    just `secret.*` rules. A backdoor / network / crypto rule that
+    happens to match a line containing a hardcoded AWS key would
+    otherwise leak the secret into the response and downloadable report.
+
+    Returns a map keyed by the finding's identity (rule_id + file_path
+    + line_start) → True when that finding was redacted. The
+    orchestrator uses this map to set ``redacted=True`` on the
     response schema.
     """
     out: list[Finding] = []
     redacted_map: dict[str, bool] = {}
     for finding in findings:
-        if not finding.rule_id.startswith("secret."):
+        new_snippet, was_redacted = _redact_text(finding.snippet)
+        new_desc, desc_redacted = _redact_text(finding.description)
+        if not was_redacted and not desc_redacted:
             out.append(finding)
             continue
-        new_snippet, was_redacted = _redact_text(finding.snippet)
-        # Always strip vendor patterns from the *description*, too — most
-        # rule descriptions don't include the value, but some do via the
-        # NPM/PYPI specifics. Best to be safe.
-        new_desc, desc_redacted = _redact_text(finding.description)
-        replacement = Finding(
-            rule_id=finding.rule_id,
-            title=finding.title,
-            description=new_desc,
-            severity=finding.severity,
-            confidence=finding.confidence,
-            category=finding.category,
-            file_path=finding.file_path,
-            line_start=finding.line_start,
-            line_end=finding.line_end,
-            snippet=new_snippet,
-            remediation=finding.remediation,
-            column_start=finding.column_start,
-            column_end=finding.column_end,
+        out.append(
+            Finding(
+                rule_id=finding.rule_id,
+                title=finding.title,
+                description=new_desc,
+                severity=finding.severity,
+                confidence=finding.confidence,
+                category=finding.category,
+                file_path=finding.file_path,
+                line_start=finding.line_start,
+                line_end=finding.line_end,
+                snippet=new_snippet,
+                remediation=finding.remediation,
+                column_start=finding.column_start,
+                column_end=finding.column_end,
+            )
         )
-        out.append(replacement)
-        if was_redacted or desc_redacted:
-            redacted_map[
-                f"{finding.rule_id}@{finding.file_path}:{finding.line_start}"
-            ] = True
+        redacted_map[
+            f"{finding.rule_id}@{finding.file_path}:{finding.line_start}"
+        ] = True
     return out, redacted_map
