@@ -2,6 +2,7 @@ import logging
 import os
 import time
 from collections import deque
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from threading import Lock
 
@@ -16,9 +17,19 @@ from app.core.settings import get_settings
 
 logger = logging.getLogger("gn_slop")
 if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    logger.addHandler(handler)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    # Optional rotating log file. Off unless GN_SLOP_LOG_FILE is set so
+    # the test suite and CLI runs don't litter the cwd. Electron's
+    # backend.log capture (electron/main.js) remains the primary on-disk
+    # log; this is a secondary structured log for deeper installs.
+    _log_file = os.environ.get("GN_SLOP_LOG_FILE")
+    if _log_file:
+        rotating = RotatingFileHandler(_log_file, maxBytes=2_000_000, backupCount=3)
+        rotating.setFormatter(formatter)
+        logger.addHandler(rotating)
 logger.setLevel(os.environ.get("GN_SLOP_LOG_LEVEL", "INFO").upper())
 
 settings = get_settings()
@@ -131,6 +142,32 @@ def _is_rate_limited(client_key: str) -> bool:
             return True
         bucket.append(now)
     return False
+
+
+@app.middleware("http")
+async def enforce_body_cap(request: Request, call_next):
+    """Refuse oversized requests before they reach a route handler.
+
+    The per-endpoint caps (media_max_bytes, archive size budget, etc.)
+    still apply, but they only fire after a route has read the body.
+    Without this middleware an attacker can POST a multi-GB body to
+    any endpoint and force Starlette to buffer it before the route
+    decides to reject it.
+    """
+    max_bytes = settings.max_request_body_bytes
+    if max_bytes > 0:
+        length_header = request.headers.get("content-length")
+        if length_header is not None:
+            try:
+                announced = int(length_header)
+            except ValueError:
+                announced = -1
+            if announced > max_bytes:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": f"Request body exceeds the {max_bytes}-byte cap."},
+                )
+    return await call_next(request)
 
 
 @app.middleware("http")

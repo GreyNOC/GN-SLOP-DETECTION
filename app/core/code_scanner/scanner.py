@@ -18,6 +18,7 @@ from app.core.code_scanner.sources import resolve_source
 from app.core.code_scanner.sources.local import LocalPathSource
 from app.core.code_scanner.suppression import is_suppressed
 from app.core.code_scanner.walker import detect_language, walk_collect
+from app.core.settings import get_settings
 
 ALGORITHM_VERSION = "code-picture-v2"
 

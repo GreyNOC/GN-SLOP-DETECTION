@@ -18,12 +18,15 @@ The adapter is deliberately conservative:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
+import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Final
+from urllib.parse import urlparse
 
 from app.core.code_scanner.model import Finding, LlmVerification
 
@@ -42,6 +45,68 @@ class LlmConfig:
     api_key: str
     base_url: str = ""
     max_tokens: int = 512
+
+
+class LlmBaseUrlError(ValueError):
+    """Raised when the user-supplied LLM base_url fails the safety check."""
+
+
+_LOOPBACK_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _validate_base_url(base_url: str) -> str:
+    """Reject base_urls that would leak the API key or hit private networks.
+
+    Rules:
+      * Empty string is fine — the dispatcher falls back to the public
+        provider default.
+      * Plain http:// is only accepted for loopback hosts (developer
+        proxies). Everything else must be https://. Sending an API key
+        over cleartext to a non-loopback host would expose it on any
+        intermediate hop.
+      * The hostname must resolve to a public IP. This blocks
+        SSRF-style payloads pointed at the AWS metadata service
+        (169.254.169.254), the container network (172.17.x.x), the
+        loopback range, and any private/reserved space.
+    """
+    if not base_url:
+        return ""
+    parsed = urlparse(base_url.strip())
+    if parsed.scheme not in {"http", "https"}:
+        raise LlmBaseUrlError("LLM base_url must be http(s).")
+    host = (parsed.hostname or "").strip()
+    if not host:
+        raise LlmBaseUrlError("LLM base_url is missing a host.")
+    if parsed.scheme == "http" and host.lower() not in _LOOPBACK_HOSTS:
+        raise LlmBaseUrlError(
+            "Plain http:// is only allowed for loopback hosts. Use https:// to keep your API key off the wire."
+        )
+    if parsed.username or parsed.password:
+        raise LlmBaseUrlError("LLM base_url may not embed credentials.")
+    if host.lower() in _LOOPBACK_HOSTS:
+        return base_url.strip()
+    try:
+        addresses = []
+        try:
+            addresses.append(ipaddress.ip_address(host))
+        except ValueError:
+            for entry in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP):
+                addresses.append(ipaddress.ip_address(entry[4][0]))
+        for address in addresses:
+            if (
+                address.is_private
+                or address.is_loopback
+                or address.is_link_local
+                or address.is_multicast
+                or address.is_reserved
+                or address.is_unspecified
+            ):
+                raise LlmBaseUrlError(
+                    "LLM base_url resolves to a private / loopback / reserved address."
+                )
+    except socket.gaierror as error:
+        raise LlmBaseUrlError(f"LLM base_url host could not be resolved: {host}") from error
+    return base_url.strip()
 
 
 _SYSTEM_PROMPT = (
@@ -130,6 +195,15 @@ def verify_finding(config: LlmConfig, finding: Finding, code: str) -> LlmVerific
             verdict="error",
             rationale=f"unsupported provider: {config.provider}",
         )
+    try:
+        _validate_base_url(config.base_url)
+    except LlmBaseUrlError as error:
+        return LlmVerification(
+            provider=config.provider,
+            model=config.model,
+            verdict="error",
+            rationale=f"base_url rejected: {error}",
+        )
     snippet = _truncate(code, _MAX_SNIPPET_CHARS)
     user_text = (
         f"Rule: {finding.rule_id} — {finding.title}\n"
@@ -165,6 +239,10 @@ def scan_whole_file(config: LlmConfig, file_path: str, code: str) -> list[dict]:
     caller folds them into the ScanResult findings list.
     """
     if config.provider not in _ALLOWED_PROVIDERS:
+        return []
+    try:
+        _validate_base_url(config.base_url)
+    except LlmBaseUrlError:
         return []
     snippet = _truncate(code, _MAX_FILE_CHARS_PER_LLM_FILE_SCAN)
     user_text = f"Path: {file_path}\n\n{snippet}"

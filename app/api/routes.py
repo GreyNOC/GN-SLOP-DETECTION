@@ -16,6 +16,7 @@ from app.core.code_scanner import (
 from app.core.code_scanner.llm import LlmConfig, scan_whole_file, verify_finding
 from app.core.code_scanner.model import Finding, Severity
 from app.core.code_scanner.sarif import to_sarif
+from app.core.code_scanner.scanner import ScanTargetForbidden
 from app.core.code_scanner.sources import LocalPathSource
 from app.core.code_scanner.walker import walk_collect
 from app.core.detector import SlopDetector
@@ -340,6 +341,8 @@ def scan_code(request: CodeScanRequest) -> CodeScanResponse:
     scan_request = _build_scan_request(request)
     try:
         result = scan_target(scan_request)
+    except ScanTargetForbidden as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except (ValueError, NotADirectoryError, RuntimeError) as error:
@@ -397,6 +400,8 @@ def scan_code_sarif(request: CodeScanRequest) -> JSONResponse:
     scan_request = _build_scan_request(request)
     try:
         result = scan_target(scan_request)
+    except ScanTargetForbidden as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except (ValueError, NotADirectoryError, RuntimeError) as error:

@@ -15,6 +15,16 @@ class Settings(BaseSettings):
     rate_limit_window_seconds: float = Field(default=60.0, alias="RATE_LIMIT_WINDOW_SECONDS")
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
     media_max_bytes: int = Field(default=64 * 1024 * 1024, alias="MEDIA_MAX_BYTES")
+    # Hard cap applied by the body-cap middleware to every request body
+    # before any route reads it. Default 256 MiB. Set to 0 to disable.
+    max_request_body_bytes: int = Field(
+        default=256 * 1024 * 1024, alias="MAX_REQUEST_BODY_BYTES"
+    )
+    # Optional containment for code scans. If set, code scan targets
+    # are required to live underneath this base path (after symlink
+    # resolution). Default empty = no containment, which is the right
+    # behaviour for a local CLI / desktop install.
+    code_scan_base_path: str = Field(default="", alias="CODE_SCAN_BASE_PATH")
 
     model_config = SettingsConfigDict(env_file=".env", populate_by_name=True, extra="ignore")
 
