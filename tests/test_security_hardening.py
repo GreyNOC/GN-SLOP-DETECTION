@@ -235,3 +235,144 @@ def test_scan_inside_base_path_is_allowed(monkeypatch, tmp_path: Path) -> None:
 
     result = scan_target(ScanRequest(target=str(base), target_type=ScanTargetType.PATH))
     assert result.files_scanned == 1
+
+
+# ---------- same-origin / CSRF guard -------------------------------------
+
+
+def test_same_origin_blocks_cross_origin_post() -> None:
+    response = client.post(
+        "/api/v1/analyze",
+        json={"text": "hello"},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert response.status_code == 403
+    assert "Cross-origin" in response.json()["detail"]
+
+
+def test_same_origin_allows_no_origin_header() -> None:
+    # CLI / curl / server-to-server case — no Origin, no Referer.
+    response = client.post("/api/v1/analyze", json={"text": "hello"})
+    assert response.status_code == 200
+
+
+def test_same_origin_allows_matching_origin() -> None:
+    response = client.post(
+        "/api/v1/analyze",
+        json={"text": "hello"},
+        headers={"Origin": "http://testserver"},
+    )
+    assert response.status_code == 200
+
+
+def test_same_origin_can_be_disabled_via_setting(monkeypatch) -> None:
+    from app import main as app_main
+
+    monkeypatch.setattr(app_main.settings, "enforce_same_origin", False)
+    response = client.post(
+        "/api/v1/analyze",
+        json={"text": "hello"},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert response.status_code == 200
+
+
+def test_same_origin_honors_extra_trusted_origins(monkeypatch) -> None:
+    from app import main as app_main
+
+    monkeypatch.setattr(app_main.settings, "extra_trusted_origins", "https://app.example")
+    response = client.post(
+        "/api/v1/analyze",
+        json={"text": "hello"},
+        headers={"Origin": "https://app.example"},
+    )
+    assert response.status_code == 200
+
+
+# ---------- LLM rationale redaction --------------------------------------
+
+
+def test_llm_verify_finding_redacts_rationale(monkeypatch) -> None:
+    """If the LLM echoes a credential back, it must be redacted on response."""
+    from app.core.code_scanner import llm as llm_module
+
+    # Pretend the LLM responded with a rationale containing an AWS key.
+    fake_message = (
+        '{"verdict": "likely_true_positive", '
+        '"rationale": "Looks like AKIAIOSFODNN7EXAMPLE leaked"}'
+    )
+
+    def fake_post_json(url, body, headers):  # noqa: ARG001
+        return {"choices": [{"message": {"content": fake_message}}]}
+
+    monkeypatch.setattr(llm_module, "_post_json", fake_post_json)
+    config = LlmConfig(provider="openai", model="gpt-4o-mini", api_key="x" * 40)
+    finding = Finding(
+        rule_id="py.eval-on-input",
+        title="t",
+        description="d",
+        severity=Severity.HIGH,
+        confidence=Confidence.HIGH,
+        category="injection",
+        file_path="x.py",
+        line_start=1,
+        line_end=1,
+        snippet="eval(payload)",
+    )
+    verification = verify_finding(config, finding, "eval(payload)")
+    assert "AKIAIOSFODNN7EXAMPLE" not in verification.rationale
+    assert "REDACTED_SECRET" in verification.rationale
+
+
+# ---------- schema validation of LlmCheckConfig --------------------------
+
+
+def test_llm_config_rejects_short_api_key() -> None:
+    response = client.post(
+        "/api/v1/scan-code",
+        json={
+            "target": ".",
+            "target_type": "path",
+            "llm": {
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "api_key": "tiny",
+                "mode": "verify_findings",
+            },
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_llm_config_rejects_unknown_provider() -> None:
+    response = client.post(
+        "/api/v1/scan-code",
+        json={
+            "target": ".",
+            "target_type": "path",
+            "llm": {
+                "provider": "imaginary",
+                "model": "x",
+                "api_key": "x" * 40,
+                "mode": "off",
+            },
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_llm_config_rejects_unknown_mode() -> None:
+    response = client.post(
+        "/api/v1/scan-code",
+        json={
+            "target": ".",
+            "target_type": "path",
+            "llm": {
+                "provider": "openai",
+                "model": "x",
+                "api_key": "x" * 40,
+                "mode": "scan_my_email",
+            },
+        },
+    )
+    assert response.status_code == 422

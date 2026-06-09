@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     # resolution). Default empty = no containment, which is the right
     # behaviour for a local CLI / desktop install.
     code_scan_base_path: str = Field(default="", alias="CODE_SCAN_BASE_PATH")
+    # CSRF-style guard. When enabled, state-changing methods (POST /
+    # PUT / DELETE / PATCH) must carry an Origin or Referer header that
+    # matches the request host (or one of the extra trusted origins).
+    # Requests with no Origin AND no Referer are allowed — that's the
+    # CLI / curl / server-to-server case.
+    enforce_same_origin: bool = Field(default=True, alias="ENFORCE_SAME_ORIGIN")
+    # Comma-separated additional origins allowed past the same-origin
+    # guard (e.g. "https://app.greynoc.com,https://staging.greynoc.com").
+    extra_trusted_origins: str = Field(default="", alias="EXTRA_TRUSTED_ORIGINS")
 
     model_config = SettingsConfigDict(env_file=".env", populate_by_name=True, extra="ignore")
 

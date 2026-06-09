@@ -196,7 +196,7 @@ def test_llm_scan_all_files_honors_single_file_target(tmp_path: Path, monkeypatc
             "llm": {
                 "provider": "openai",
                 "model": "gpt-4o-mini",
-                "api_key": "fake-key",
+                "api_key": "fake-key-padded-to-cross-the-minlength-check",
                 "mode": "scan_all_files",
             },
         },
@@ -231,7 +231,7 @@ def test_llm_verification_serializes_into_response(tmp_path: Path, monkeypatch) 
             "llm": {
                 "provider": "openai",
                 "model": "gpt-4o-mini",
-                "api_key": "fake-key",
+                "api_key": "fake-key-padded-to-cross-the-minlength-check",
                 "mode": "verify_findings",
             },
         },

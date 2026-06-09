@@ -144,6 +144,88 @@ def _is_rate_limited(client_key: str) -> bool:
     return False
 
 
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _trusted_origin_set() -> frozenset[str]:
+    raw = settings.extra_trusted_origins
+    if not raw:
+        return frozenset()
+    return frozenset(entry.strip() for entry in raw.split(",") if entry.strip())
+
+
+def _origin_matches_host(request: Request, header_value: str) -> bool:
+    """Return True when the supplied Origin/Referer value is same-origin.
+
+    Same-origin means same scheme + host + port as the request itself.
+    For Referer we ignore the path/query parts.
+    """
+    from urllib.parse import urlparse  # local import: tiny cost, no top-level pollution
+
+    try:
+        parsed = urlparse(header_value)
+    except Exception:
+        return False
+    if not parsed.scheme or not parsed.netloc:
+        return False
+    if request.url.scheme != parsed.scheme:
+        return False
+    if request.url.netloc != parsed.netloc:
+        return False
+    return True
+
+
+@app.middleware("http")
+async def enforce_same_origin(request: Request, call_next):
+    """CSRF guard against malicious websites that can reach the loopback port.
+
+    A web page visited in any browser tab can POST to ``http://127.0.0.1:<port>``
+    and drive the API — that includes triggering code scans of attacker-
+    chosen paths, posting to the BYO-LLM endpoint at the user's cost,
+    or sending a multi-GB body. TrustedHostMiddleware doesn't stop this
+    (it only checks the Host header, which the browser always sets to
+    the loopback address). The browser does include an Origin header on
+    cross-origin POSTs, so we use that as the perimeter.
+
+    CLI clients, curl, and server-to-server callers don't send Origin
+    or Referer — those are explicitly allowed so we don't break the
+    existing surface.
+    """
+    if not settings.enforce_same_origin:
+        return await call_next(request)
+    if request.method.upper() not in _STATE_CHANGING_METHODS:
+        return await call_next(request)
+    origin = request.headers.get("origin")
+    referer = request.headers.get("referer")
+    if not origin and not referer:
+        return await call_next(request)
+    trusted = _trusted_origin_set()
+    for candidate in (origin, referer):
+        if not candidate:
+            continue
+        if _origin_matches_host(request, candidate):
+            return await call_next(request)
+        # extra_trusted_origins lets a deployment whitelist a non-loopback origin.
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(candidate)
+            origin_only = f"{parsed.scheme}://{parsed.netloc}"
+            if origin_only in trusted:
+                return await call_next(request)
+        except Exception:
+            pass
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": (
+                "Cross-origin POST blocked. Set ENFORCE_SAME_ORIGIN=false or add "
+                "the calling origin to EXTRA_TRUSTED_ORIGINS to allow it."
+            )
+        },
+    )
+
+
 @app.middleware("http")
 async def enforce_body_cap(request: Request, call_next):
     """Refuse oversized requests before they reach a route handler.
