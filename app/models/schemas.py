@@ -1,6 +1,6 @@
 from typing import Final
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 MAX_TEXT_LENGTH: Final = 200_000
 MAX_SOURCE_LENGTH: Final = 256
@@ -166,12 +166,32 @@ class MediaAnalysisResponse(BaseModel):
     parse_warning: str | None = None
 
 
+_LLM_ALLOWED_PROVIDERS: Final = ("openai", "anthropic")
+_LLM_ALLOWED_MODES: Final = ("off", "verify_findings", "scan_all_files")
+
+
 class LlmCheckConfig(BaseModel):
     provider: str = Field(..., description="openai or anthropic")
-    model: str
-    api_key: str
-    base_url: str | None = None
+    model: str = Field(..., min_length=1, max_length=128)
+    api_key: str = Field(..., min_length=20, max_length=512)
+    base_url: str | None = Field(default=None, max_length=2048)
     mode: str = Field(default="off", description="off | verify_findings | scan_all_files")
+
+    @field_validator("provider")
+    @classmethod
+    def _provider_allowlist(cls, value: str) -> str:
+        if value not in _LLM_ALLOWED_PROVIDERS:
+            raise ValueError(
+                f"provider must be one of {_LLM_ALLOWED_PROVIDERS}, got {value!r}"
+            )
+        return value
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_allowlist(cls, value: str) -> str:
+        if value not in _LLM_ALLOWED_MODES:
+            raise ValueError(f"mode must be one of {_LLM_ALLOWED_MODES}, got {value!r}")
+        return value
 
 
 class CodeScanRequest(BaseModel):

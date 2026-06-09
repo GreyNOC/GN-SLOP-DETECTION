@@ -29,6 +29,7 @@ from typing import Final
 from urllib.parse import urlparse
 
 from app.core.code_scanner.model import Finding, LlmVerification
+from app.core.code_scanner.redaction import redact_text
 
 # Cap egress so a user holding a finger to the API doesn't accidentally
 # spend big.
@@ -224,11 +225,16 @@ def verify_finding(config: LlmConfig, finding: Finding, code: str) -> LlmVerific
     verdict = str(parsed.get("verdict", "uncertain")).lower()
     if verdict not in {"likely_true_positive", "likely_false_positive", "uncertain"}:
         verdict = "uncertain"
+    # Sanitize the model's free-form rationale on the way back. If the
+    # LLM echoed any of the snippet it just saw (or fabricated a secret
+    # token in its explanation), the redactor catches it before we
+    # surface the string to API clients / reports.
+    safe_rationale, _ = redact_text(str(parsed.get("rationale", ""))[:240])
     return LlmVerification(
         provider=config.provider,
         model=config.model,
         verdict=verdict,
-        rationale=str(parsed.get("rationale", ""))[:240],
+        rationale=safe_rationale,
     )
 
 
@@ -254,11 +260,13 @@ def scan_whole_file(config: LlmConfig, file_path: str, code: str) -> list[dict]:
     for entry in parsed:
         if not isinstance(entry, dict):
             continue
+        safe_title, _ = redact_text(str(entry.get("title", ""))[:160])
+        safe_rationale, _ = redact_text(str(entry.get("rationale", ""))[:240])
         cleaned.append(
             {
-                "title": str(entry.get("title", ""))[:160],
+                "title": safe_title,
                 "line": int(entry.get("line", 1)) if str(entry.get("line", "")).isdigit() else 1,
-                "rationale": str(entry.get("rationale", ""))[:240],
+                "rationale": safe_rationale,
                 "severity": str(entry.get("severity", "medium")).lower(),
             }
         )
