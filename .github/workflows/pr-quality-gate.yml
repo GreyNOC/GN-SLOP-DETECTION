@@ -3,16 +3,21 @@ name: PR Quality Gate
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, edited]
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
 
 permissions:
   contents: read
-  issues: read
-  pull-requests: write
 
 jobs:
   metadata-guard:
     name: Metadata and slop guard
+    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: write
     steps:
       # Security note: this workflow intentionally does not check out or execute
       # pull request code. pull_request_target runs with base-repo privileges, so
@@ -58,12 +63,13 @@ jobs:
 
   readonly-tests:
     name: Read-only code checks
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      # This job runs on pull_request, not pull_request_target, so it gets a
-      # read-only token and no repo secrets. It is safe to checkout PR code here.
+      # This job runs only on pull_request, so it gets a read-only token and no
+      # repo secrets. It is safe to checkout PR code here.
       - name: Checkout PR code safely
         uses: actions/checkout@v5
         with:
