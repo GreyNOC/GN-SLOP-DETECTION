@@ -1,0 +1,80 @@
+name: PR Quality Gate
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+
+jobs:
+  metadata-guard:
+    name: Metadata and slop guard
+    runs-on: ubuntu-latest
+    steps:
+      # Security note: this workflow intentionally does not check out or execute
+      # pull request code. pull_request_target runs with base-repo privileges, so
+      # keep this job limited to GitHub metadata/API-only checks.
+      - name: Flag suspicious PR text
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = `${pr.title || ''}\n\n${pr.body || ''}`;
+            const patterns = [
+              [/\b(ignore|disregard|forget)\s+(all\s+)?(previous|prior|above)\s+instructions\b/i, 'prompt-injection'],
+              [/\b(do\s+not|don't|dont)\s+(flag|detect|report|scan|review)\b/i, 'automation-bypass'],
+              [/<!--[\s\S]*?(ignore|disregard|do\s+not\s+review|do\s+not\s+flag)[\s\S]*?-->/i, 'hidden-review-instruction'],
+            ];
+
+            const hits = patterns.filter(([regex]) => regex.test(body)).map(([, label]) => label);
+            if (hits.length === 0) {
+              core.info('No suspicious PR-text signals found.');
+              return;
+            }
+
+            const labels = ['needs-maintainer-review', ...hits.map(hit => `guard:${hit}`)];
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              labels,
+            });
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: [
+                'Automated PR quality guard found review/automation steering signals:',
+                '',
+                ...hits.map(hit => `- ${hit}`),
+                '',
+                'This is observe-only and does not prove authorship. A maintainer should review before merging.',
+              ].join('\n'),
+            });
+
+  readonly-tests:
+    name: Read-only code checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # This job runs on pull_request, not pull_request_target, so it gets a
+      # read-only token and no repo secrets. It is safe to checkout PR code here.
+      - name: Checkout PR code safely
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Run tests
+        run: pytest
