@@ -5,6 +5,10 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from statistics import mean, pstdev
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.core.model_detector import ModelDetector, ModelDetectorResult
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,10 @@ class DetectionResult:
     content_profile: str = "general"
     sample_quality: str = "medium"
     confidence: float = 1.0
+    # Optional model-based AI-likelihood estimate (see model_detector.py).
+    # None unless a ModelDetector was supplied to analyze(). Surfaced as
+    # explainable metadata only — never folded into the composite score.
+    model_detection: ModelDetectorResult | None = None
 
 
 EM_DASH = "—"
@@ -90,6 +98,44 @@ CITATION_RE = re.compile(
 )
 EM_DASH_RE = re.compile(rf"[{EM_DASH}{EN_DASH}]")
 
+# Frontier rhetorical patterns (2025-26). The static lexicons catch dead
+# 2023-era tells; these catch what modern models actually do. Modern models
+# deliberately vary sentence length (blunting the burstiness/MATTR signals),
+# but they lean hard on a few rhetorical and layout moves.
+#
+# Contrastive negation: "it's not just X, it's Y" / "isn't about X, it's Y"
+# (em/en dashes are already normalized to " - " before matching).
+CONTRASTIVE_NEGATION_RE = re.compile(
+    # "about" is dropped from the qualifier set: "not about X, but Y" is
+    # ordinary contrastive prose, not the AI tic. The pivot accepts the
+    # un-contracted "it is" / "that is" too, not just the contraction.
+    r"\b(?:it'?s|that'?s|this is|we'?re|they'?re|you'?re)?\s*not\s+"
+    r"(?:just|only|merely|simply)\b[^.!?]{1,80}?"
+    r"(?:,\s*(?:it'?s|it\s+is|that'?s|that\s+is|but rather|but)\b"
+    r"|\s-\s|;\s*(?:it'?s|it\s+is)\b)",
+    re.IGNORECASE,
+)
+# Bare "not X - it's Y" / "not X, but Y" without a leading pronoun.
+CONTRASTIVE_NEGATION_DASH_RE = re.compile(
+    r"\bnot\s+[^.!?,]{2,40}\s-\s(?:it'?s|but|rather)\b",
+    re.IGNORECASE,
+)
+# Rule-of-three escalation: three comma-separated items with a trailing
+# and/or, e.g. "faster, cheaper, and safer". Three capture groups so the
+# detector can filter technical enumerations (acronyms / numbers).
+RULE_OF_THREE_RE = re.compile(
+    r"\b(\w+(?:\s\w+){0,2}),\s+(\w+(?:\s\w+){0,2}),\s+(?:and|or)\s+(\w+(?:\s\w+){0,2})\b",
+    re.IGNORECASE,
+)
+# Over-structuring (run on RAW text — markdown survives only before
+# normalization collapses newlines): headers, heavy bold runs, emoji bullets.
+MD_HEADER_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s+\S")
+MD_BOLD_RE = re.compile(r"\*\*[^*\n]{1,60}\*\*")
+EMOJI_BULLET_RE = re.compile(
+    r"(?m)^\s*(?:[-*]\s+)?"
+    r"(?:✅|❌|✨|•|\U0001F449|\U0001F539|\U0001F4A1|\U0001F680|➡|⭐)"
+)
+
 # Function words that should be excluded from repetition / TTR / stuffing analyses
 # so signal calculations are dominated by content tokens.
 STOPWORDS = frozenset({
@@ -118,6 +164,9 @@ _PROFILE_MULTIPLIERS: dict[str, dict[str, float]] = {
         "vague_language": 0.55,
         "filler_phrases": 0.65,
         "long_sentences": 0.5,
+        # Runbooks/playbooks legitimately use headers, bold, and triads.
+        "over_structuring": 0.6,
+        "rule_of_three": 0.7,
     },
     "marketing": {
         # Marketing copy will always use some promotional language;
@@ -133,12 +182,16 @@ _PROFILE_MULTIPLIERS: dict[str, dict[str, float]] = {
         # Academic writing rewards citations; soften the AI-template
         # signal because formal prose is allowed to be formulaic.
         "template_or_ai_scars": 0.7,
+        # Formal argumentation uses "not X but Y" framing legitimately.
+        "contrastive_negation": 0.7,
     },
     "support": {
         # Support tickets are conversational; long sentences and
         # transitions are normal.
         "long_sentences": 0.6,
         "transition_word_stuffing": 0.7,
+        # Numbered step lists are normal in support replies.
+        "over_structuring": 0.7,
     },
 }
 
@@ -180,7 +233,7 @@ class SlopDetector:
     it scores signs of weak, repetitive, generic, or unsupported content.
     """
 
-    ALGORITHM_VERSION = "rule-picture-v4"
+    ALGORITHM_VERSION = "rule-picture-v5"
 
     VAGUE_TERMS = frozenset({
         "revolutionary", "cutting-edge", "game-changing", "next-generation",
@@ -216,6 +269,12 @@ class SlopDetector:
         "in the world of", "navigating the complexities", "in the ever-evolving",
         "play a crucial role", "play a pivotal role", "the bottom line",
         "first and foremost", "in essence",
+        # 2025-26 frontier filler.
+        "a testament to", "speaks volumes", "in the grand scheme of things",
+        "at the heart of", "a deep dive into", "the ever-changing landscape",
+        "stand the test of time", "a double-edged sword", "the lifeblood of",
+        "when it comes down to it", "shed light on", "pave the way",
+        "the secret sauce", "the name of the game",
     })
 
     AI_OR_TEMPLATE_PHRASES = frozenset({
@@ -226,6 +285,12 @@ class SlopDetector:
         "of course!", "certainly!", "absolutely!", "great question",
         "i'm sorry, but", "as an ai", "i am an ai", "as a language model",
         "you might be wondering", "let's take a closer look",
+        # 2025-26 chat-assistant residue.
+        "here's a breakdown", "here's the breakdown", "let's dive deeper",
+        "to put it simply", "to sum it up", "in summary,", "key takeaways",
+        "tl;dr", "in short,", "hope this helps!", "happy to help",
+        "i'd be happy to", "great point", "you're absolutely right",
+        "let's get started", "without further ado",
     })
 
     SEO_PHRASES = frozenset({
@@ -233,12 +298,33 @@ class SlopDetector:
         "must-read", "click here", "boost your", "rank higher",
         "game changer", "deep dive", "supercharge", "next-level",
         "level up your",
+        # 2025-26 listicle / blog scaffolding.
+        "in this article", "read on", "keep reading", "the complete guide",
+        "step-by-step guide", "pro tip", "here's why",
     })
 
     AI_TRANSITION_WORDS = frozenset({
         "moreover", "furthermore", "additionally", "however",
         "consequently", "therefore", "nonetheless", "nevertheless",
         "ultimately", "notably", "importantly", "indeed", "essentially",
+        "crucially", "fundamentally", "interestingly", "remarkably",
+        "significantly", "arguably", "likewise",
+    })
+
+    # Current frontier rhetorical openers/connectors — exact-phrase, low
+    # false-positive, surfaced as template residue. Punctuation-anchored
+    # entries ("the result?", "the takeaway?") are near-zero FP; bare
+    # high-FP phrases ("that said", "the truth is") are deliberately
+    # excluded to keep precision high.
+    FRONTIER_RHETORIC_PHRASES = frozenset({
+        "here's the thing", "here is the thing", "let's break it down",
+        "let's break this down", "the result?", "the takeaway?",
+        "the bottom line?", "at its core", "in a world where",
+        "more than just", "but here's the kicker", "the kicker?",
+        "think of it like", "think of it as", "the beauty of",
+        "this is where", "the magic happens", "let that sink in",
+        "what does this mean for you", "so what does this mean",
+        "buckle up", "plot twist", "long story short",
     })
 
     CLAIM_VERBS = frozenset({
@@ -253,7 +339,12 @@ class SlopDetector:
     MIN_WORDS_FOR_TTR = 80
     TTR_FLAG_THRESHOLD = 0.45
 
-    def analyze(self, text: str, profile: str = "general") -> DetectionResult:
+    def analyze(
+        self,
+        text: str,
+        profile: str = "general",
+        model_detector: ModelDetector | None = None,
+    ) -> DetectionResult:
         if profile not in _VALID_PROFILES:
             profile = "general"
         raw = text or ""
@@ -313,6 +404,13 @@ class SlopDetector:
                 "Search-optimized or promotional phrasing may be crowding out substance",
             )
         )
+        signals.extend(
+            self._phrase_signal(
+                normalized_lower, self.FRONTIER_RHETORIC_PHRASES,
+                "frontier_rhetoric", "authenticity", 0.14,
+                "Rhetorical openers/connectors common in modern generated prose",
+            )
+        )
 
         transitions = sum(1 for word in words if word in self.AI_TRANSITION_WORDS)
         if (
@@ -336,6 +434,43 @@ class SlopDetector:
                 DetectionSignal(
                     "em_dash_overuse", "authenticity", 0.16, em_dash_count,
                     "Heavy em/en-dash usage relative to length is a frequent AI pattern",
+                )
+            )
+
+        # Contrastive negation ("not just X, it's Y") — authenticity scar.
+        contrastive = self._contrastive_negation(normalized)
+        if word_count >= 40 and contrastive >= 2:
+            signals.append(
+                DetectionSignal(
+                    "contrastive_negation", "authenticity", 0.16, contrastive,
+                    "Repeated 'not just X, it's Y' framing is a frequent AI rhetorical tic",
+                )
+            )
+
+        # Rule-of-three escalation — structural tic, weak per-hit so require 3.
+        triads = self._rule_of_three(normalized)
+        if word_count >= 60 and triads >= 3:
+            signals.append(
+                DetectionSignal(
+                    "rule_of_three", "structure", 0.12, triads,
+                    "Frequent three-part comma escalations suggest templated rhetoric",
+                )
+            )
+
+        # Over-structuring (heavy headers / bold / emoji bullets) on RAW text.
+        headers, bold_runs, emoji_bullets = self._over_structuring(raw)
+        structure_load = (
+            (1 if headers >= 4 else 0)
+            + (1 if bold_runs >= 6 else 0)
+            + (1 if emoji_bullets >= 3 else 0)
+        )
+        if word_count >= 80 and structure_load >= 2:
+            signals.append(
+                DetectionSignal(
+                    "over_structuring", "structure", 0.12,
+                    headers + bold_runs + emoji_bullets,
+                    "Heavy headers, bold runs, or emoji bullets relative to length "
+                    "is a generated-layout pattern",
                 )
             )
 
@@ -482,6 +617,14 @@ class SlopDetector:
         dimensions = self._dimensions(signals, profile_content)
         recommendation = self._recommendation(risk, dimensions)
         sample_quality, confidence = self._sample_quality(word_count)
+        # Optional model-based second opinion. A buggy or unavailable
+        # detector must never break rule-based analysis, so swallow errors.
+        model_detection = None
+        if model_detector is not None:
+            try:
+                model_detection = model_detector.analyze(raw)
+            except Exception:
+                model_detection = None
         return DetectionResult(
             score=score,
             risk=risk,
@@ -493,6 +636,7 @@ class SlopDetector:
             content_profile=profile,
             sample_quality=sample_quality,
             confidence=confidence,
+            model_detection=model_detection,
         )
 
     def _normalize_for_matching(self, text: str) -> str:
@@ -709,6 +853,39 @@ class SlopDetector:
                 starters.append(" ".join(tokens[:2]))
         counts = Counter(starters)
         return sum(1 for count in counts.values() if count >= 3)
+
+    def _contrastive_negation(self, normalized: str) -> int:
+        # "not just X, it's Y" framing. Two patterns; sum their hits.
+        return (
+            len(CONTRASTIVE_NEGATION_RE.findall(normalized))
+            + len(CONTRASTIVE_NEGATION_DASH_RE.findall(normalized))
+        )
+
+    def _rule_of_three(self, normalized: str) -> int:
+        # Comma triads with a trailing and/or. Filter technical enumerations
+        # so "TCP, UDP, and ICMP", "REST, SOAP, and GraphQL", or "v1, v2, and
+        # v3" are not mistaken for rhetorical escalation. Run on cased text so
+        # acronyms are visible.
+        count = 0
+        for match in RULE_OF_THREE_RE.finditer(normalized):
+            items = [match.group(1).strip(), match.group(2).strip(), match.group(3).strip()]
+            if any(any(ch.isdigit() for ch in item) for item in items):
+                continue
+            # Skip when any item is a short all-caps token (an acronym like
+            # TCP/REST). A single acronym is enough to mark the triad as a
+            # technical enumeration rather than rhetoric.
+            if any(item.isalpha() and item.isupper() and len(item) <= 6 for item in items):
+                continue
+            count += 1
+        return count
+
+    def _over_structuring(self, raw: str) -> tuple[int, int, int]:
+        # RAW text: markdown markers survive only before normalization
+        # collapses newlines and rewrites punctuation.
+        headers = len(MD_HEADER_RE.findall(raw))
+        bold = len(MD_BOLD_RE.findall(raw))
+        emoji_bullets = len(EMOJI_BULLET_RE.findall(raw))
+        return headers, bold, emoji_bullets
 
     def _burstiness(self, sentence_lengths: list[int]) -> float:
         # Coefficient of variation. Human prose mixes short/long sentences; AI

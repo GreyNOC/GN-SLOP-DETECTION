@@ -12,18 +12,20 @@ The adapter is deliberately conservative:
     code, never the whole repo.
   * Output is forced into a small JSON schema ({verdict, rationale}).
     Anything that doesn't match maps to ``verdict="error"``.
-  * Network calls go through stdlib urllib so we don't add a runtime
-    dependency on httpx / requests.
+  * Network calls go through stdlib http.client / socket / ssl (no httpx /
+    requests dependency), with the socket pinned to a validated IP so a DNS
+    rebind cannot defeat the base_url SSRF check between validation and
+    connect.
 """
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import re
 import socket
-import urllib.error
-import urllib.request
+import ssl
 from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlparse
@@ -35,8 +37,23 @@ from app.core.code_scanner.redaction import redact_text
 # spend big.
 _MAX_SNIPPET_CHARS: Final = 4_000
 _MAX_FILE_CHARS_PER_LLM_FILE_SCAN: Final = 16_000
+_MAX_TEXT_JUDGE_CHARS: Final = 12_000
 _REQUEST_TIMEOUT_SECONDS: Final = 30
 _ALLOWED_PROVIDERS: Final = frozenset({"openai", "anthropic"})
+
+# Anthropic model families that use adaptive thinking and REJECT the
+# ``temperature`` parameter — sending it returns HTTP 400. Everything not
+# matched here is treated as a legacy model that still accepts
+# ``temperature``. Misclassification is non-fatal: ``_call_anthropic``
+# retries once with a minimal body on a 400. Add new frontier families
+# here as they ship.
+_ADAPTIVE_ANTHROPIC_PREFIXES: Final = (
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-fable-5",
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +63,11 @@ class LlmConfig:
     api_key: str
     base_url: str = ""
     max_tokens: int = 512
+    # Effort for adaptive-thinking Anthropic models (low | medium | high |
+    # max). Default "low" keeps per-finding verification cheap while still
+    # letting frontier models reason briefly. Ignored by legacy models and
+    # the OpenAI path.
+    effort: str = "low"
 
 
 class LlmBaseUrlError(ValueError):
@@ -53,6 +75,18 @@ class LlmBaseUrlError(ValueError):
 
 
 _LOOPBACK_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _ip_is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True for any address an SSRF guard must refuse (private/loopback/etc)."""
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
 
 
 def _validate_base_url(base_url: str) -> str:
@@ -94,20 +128,40 @@ def _validate_base_url(base_url: str) -> str:
             for entry in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP):
                 addresses.append(ipaddress.ip_address(entry[4][0]))
         for address in addresses:
-            if (
-                address.is_private
-                or address.is_loopback
-                or address.is_link_local
-                or address.is_multicast
-                or address.is_reserved
-                or address.is_unspecified
-            ):
+            if _ip_is_blocked(address):
                 raise LlmBaseUrlError(
                     "LLM base_url resolves to a private / loopback / reserved address."
                 )
     except socket.gaierror as error:
         raise LlmBaseUrlError(f"LLM base_url host could not be resolved: {host}") from error
+    # NOTE: this is an early reject for UX. The connect-time SSRF guarantee
+    # is enforced in _post_json, which pins the socket to a validated IP so a
+    # DNS rebind between this check and the request cannot redirect egress.
     return base_url.strip()
+
+
+def _resolve_pinned_ip(host: str, scheme: str) -> str:
+    """Resolve ``host`` to one validated IP and return it for pinning.
+
+    Resolving and validating here — then connecting to the returned IP rather
+    than re-resolving the hostname — is what closes the DNS-rebinding / TOCTOU
+    window: the address we vet is the exact address we connect to. Rejects the
+    whole host if ANY resolved address is non-public (a rebind can return one
+    good and one bad record). Loopback names are allowed only for the
+    developer-proxy case already gated by _validate_base_url.
+    """
+    normalized = (host or "").strip().lower()
+    if normalized in _LOOPBACK_HOSTS:
+        return "::1" if normalized == "::1" else "127.0.0.1"
+    addresses: list[str] = []
+    for entry in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP):
+        ip_text = entry[4][0]
+        if _ip_is_blocked(ipaddress.ip_address(ip_text)):
+            raise LlmBaseUrlError(f"{host} resolves to a non-public address ({ip_text}).")
+        addresses.append(ip_text)
+    if not addresses:
+        raise LlmBaseUrlError(f"{host} did not resolve to any address.")
+    return addresses[0]
 
 
 _SYSTEM_PROMPT = (
@@ -130,26 +184,118 @@ _WHOLE_FILE_SYSTEM_PROMPT = (
 )
 
 
+# JSON Schema handed to Anthropic ``output_config.format`` so adaptive-
+# thinking models return schema-valid JSON we never have to scrape. Legacy
+# Claude models and the OpenAI path ignore it and fall back to
+# ``_extract_first_json``.
+_VERIFY_OUTPUT_SCHEMA: Final = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": [
+                    "likely_true_positive",
+                    "likely_false_positive",
+                    "uncertain",
+                ],
+            },
+            "rationale": {"type": "string"},
+        },
+        "required": ["verdict", "rationale"],
+        "additionalProperties": False,
+    },
+}
+
+
+_TEXT_JUDGE_SYSTEM_PROMPT = (
+    "You are a content-quality and AI-authorship analyst. The user pastes a "
+    "passage of writing. Judge it on two independent axes and respond with "
+    "JSON only, matching this schema exactly:\n"
+    '{"ai_likelihood": "low"|"medium"|"high", '
+    '"slop_verdict": "clean"|"review"|"slop", '
+    '"rationale": "<one or two short sentences>"}\n'
+    "ai_likelihood is your estimate that the passage was machine-generated. "
+    "slop_verdict reflects vague, repetitive, padded, or unsupported writing "
+    "regardless of who or what wrote it. Do not output anything outside the "
+    "JSON object."
+)
+
+
+_TEXT_JUDGE_OUTPUT_SCHEMA: Final = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "ai_likelihood": {"type": "string", "enum": ["low", "medium", "high"]},
+            "slop_verdict": {"type": "string", "enum": ["clean", "review", "slop"]},
+            "rationale": {"type": "string"},
+        },
+        "required": ["ai_likelihood", "slop_verdict", "rationale"],
+        "additionalProperties": False,
+    },
+}
+
+
 def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "\n…[truncated]"
 
 
 def _post_json(url: str, body: dict, headers: dict[str, str]) -> dict | str:
+    """POST JSON and return the parsed body (or an error string).
+
+    The connection is pinned to an IP that is resolved-and-validated here,
+    immediately before connecting, so a DNS rebind cannot redirect the
+    request (with its API key and payload) to a private / metadata address
+    after an earlier ``_validate_base_url`` check passed.
+    """
     data = json.dumps(body).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    parsed = urlparse(url)
+    scheme = parsed.scheme
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
     try:
-        with urllib.request.urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return raw
-    except urllib.error.HTTPError as error:
-        return f"HTTPError {error.code}: {error.reason}"
-    except urllib.error.URLError as error:
-        return f"URLError: {error.reason}"
+        pinned_ip = _resolve_pinned_ip(host, scheme)
+    except (LlmBaseUrlError, socket.gaierror, ValueError) as error:
+        return f"URLError: {error}"
+
+    conn: http.client.HTTPConnection | None = None
+    try:
+        raw_sock = socket.create_connection((pinned_ip, port), timeout=_REQUEST_TIMEOUT_SECONDS)
+        if scheme == "https":
+            # Pin the socket to the validated IP, but keep cert validation /
+            # SNI bound to the hostname.
+            sock = ssl.create_default_context().wrap_socket(raw_sock, server_hostname=host)
+            conn = http.client.HTTPSConnection(host, port, timeout=_REQUEST_TIMEOUT_SECONDS)
+        else:
+            sock = raw_sock
+            conn = http.client.HTTPConnection(host, port, timeout=_REQUEST_TIMEOUT_SECONDS)
+        conn.sock = sock  # bypass conn.connect(), which would re-resolve the name
+        send_headers = dict(headers)
+        send_headers.setdefault("Host", host)
+        conn.request("POST", path, body=data, headers=send_headers)
+        response = conn.getresponse()
+        raw = response.read().decode("utf-8", errors="replace")
+        if response.status >= 400:
+            return f"HTTPError {response.status}: {response.reason}"
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
     except TimeoutError:
         return "Request timed out."
+    except (OSError, http.client.HTTPException) as error:
+        return f"URLError: {error}"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _extract_first_json(text: str) -> dict | list | None:
@@ -213,7 +359,9 @@ def verify_finding(config: LlmConfig, finding: Finding, code: str) -> LlmVerific
         f"Description: {finding.description}\n\n"
         f"Code:\n{snippet}\n"
     )
-    response = _call_provider(config, _SYSTEM_PROMPT, user_text)
+    response = _call_provider(
+        config, _SYSTEM_PROMPT, user_text, output_schema=_VERIFY_OUTPUT_SCHEMA
+    )
     parsed = _extract_first_json(response)
     if not isinstance(parsed, dict):
         return LlmVerification(
@@ -273,12 +421,77 @@ def scan_whole_file(config: LlmConfig, file_path: str, code: str) -> list[dict]:
     return cleaned
 
 
-def _call_provider(config: LlmConfig, system: str, user: str) -> str:
+@dataclass(frozen=True)
+class LlmTextJudgment:
+    """Result of asking a user-supplied LLM to judge a prose passage.
+
+    Mirrors ``LlmVerification`` but for the text engine. ``ai_likelihood``
+    and ``slop_verdict`` are always constrained to a fixed vocabulary
+    (plus ``"error"``); the model never drives routing logic directly.
+    """
+
+    provider: str
+    model: str
+    ai_likelihood: str  # low | medium | high | error
+    slop_verdict: str  # clean | review | slop | error
+    rationale: str
+
+
+def _text_judge_error(config: LlmConfig, reason: str) -> LlmTextJudgment:
+    return LlmTextJudgment(
+        provider=config.provider,
+        model=config.model,
+        ai_likelihood="error",
+        slop_verdict="error",
+        rationale=reason[:240],
+    )
+
+
+def judge_text(config: LlmConfig, text: str) -> LlmTextJudgment:
+    """Ask the user's LLM for an AI-likelihood + slop second opinion on prose.
+
+    This reuses the same hardened plumbing as the code scanner (base_url
+    SSRF validation, bounded egress, structured output, rationale
+    redaction) so the text engine gets a frontier-model judge without a
+    second, less-careful network path.
+    """
+    if config.provider not in _ALLOWED_PROVIDERS:
+        return _text_judge_error(config, f"unsupported provider: {config.provider}")
+    try:
+        _validate_base_url(config.base_url)
+    except LlmBaseUrlError as error:
+        return _text_judge_error(config, f"base_url rejected: {error}")
+    snippet = _truncate(text, _MAX_TEXT_JUDGE_CHARS)
+    response = _call_provider(
+        config, _TEXT_JUDGE_SYSTEM_PROMPT, snippet, output_schema=_TEXT_JUDGE_OUTPUT_SCHEMA
+    )
+    parsed = _extract_first_json(response)
+    if not isinstance(parsed, dict):
+        return _text_judge_error(config, str(response))
+    ai_likelihood = str(parsed.get("ai_likelihood", "")).lower()
+    if ai_likelihood not in {"low", "medium", "high"}:
+        ai_likelihood = "medium"
+    slop_verdict = str(parsed.get("slop_verdict", "")).lower()
+    if slop_verdict not in {"clean", "review", "slop"}:
+        slop_verdict = "review"
+    safe_rationale, _ = redact_text(str(parsed.get("rationale", ""))[:240])
+    return LlmTextJudgment(
+        provider=config.provider,
+        model=config.model,
+        ai_likelihood=ai_likelihood,
+        slop_verdict=slop_verdict,
+        rationale=safe_rationale,
+    )
+
+
+def _call_provider(
+    config: LlmConfig, system: str, user: str, *, output_schema: dict | None = None
+) -> str:
     """Dispatch the configured provider and return raw response text."""
     if config.provider == "openai":
         return _call_openai_compatible(config, system, user)
     if config.provider == "anthropic":
-        return _call_anthropic(config, system, user)
+        return _call_anthropic(config, system, user, output_schema=output_schema)
     return ""
 
 
@@ -307,25 +520,150 @@ def _call_openai_compatible(config: LlmConfig, system: str, user: str) -> str:
         return json.dumps(response)[:240]
 
 
-def _call_anthropic(config: LlmConfig, system: str, user: str) -> str:
-    base = config.base_url.rstrip("/") if config.base_url else "https://api.anthropic.com"
-    url = f"{base}/v1/messages"
-    body = {
+def _anthropic_uses_adaptive_thinking(model: str) -> bool:
+    """True for Claude families that use adaptive thinking and reject ``temperature``.
+
+    The latest frontier Claude models (Opus 4.6+, Sonnet 4.6, Fable 5)
+    removed ``temperature`` — sending it returns HTTP 400 — and take
+    ``thinking={"type": "adaptive"}`` plus ``output_config.effort`` instead
+    of a fixed thinking budget. Older models keep the classic surface.
+    """
+    model_id = model.strip().lower()
+    return any(model_id.startswith(prefix) for prefix in _ADAPTIVE_ANTHROPIC_PREFIXES)
+
+
+def _anthropic_body(
+    config: LlmConfig,
+    system: str,
+    user: str,
+    output_schema: dict | None,
+    style: str,
+) -> dict:
+    """Build a Messages API body for one of three request styles.
+
+    ``adaptive`` — frontier models: no ``temperature``; adaptive thinking,
+    effort, and (optionally) a structured-output schema.
+    ``legacy`` — older models: the classic ``temperature`` body.
+    ``minimal`` — the retry body: omits every field any model might reject.
+    """
+    body: dict = {
         "model": config.model,
         "system": system,
         "messages": [{"role": "user", "content": user}],
         "max_tokens": config.max_tokens,
-        "temperature": 0.0,
     }
+    if style == "adaptive":
+        # Thinking tokens count toward max_tokens, so floor the ceiling well
+        # above the short-answer cap or the JSON gets truncated mid-object.
+        body["max_tokens"] = max(config.max_tokens, 4096)
+        body["thinking"] = {"type": "adaptive"}
+        output_config: dict = {"effort": config.effort}
+        if output_schema is not None:
+            output_config["format"] = output_schema
+        body["output_config"] = output_config
+    elif style == "legacy":
+        body["temperature"] = 0.0
+    # "minimal": base body only — no temperature, thinking, or output_config.
+    return body
+
+
+def _call_anthropic(
+    config: LlmConfig, system: str, user: str, *, output_schema: dict | None = None
+) -> str:
+    base = config.base_url.rstrip("/") if config.base_url else "https://api.anthropic.com"
+    url = f"{base}/v1/messages"
     headers = {
         "x-api-key": config.api_key,
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
     }
-    response = _post_json(url, body, headers)
+    style = "adaptive" if _anthropic_uses_adaptive_thinking(config.model) else "legacy"
+    response = _post_json(
+        url, _anthropic_body(config, system, user, output_schema, style), headers
+    )
+    # Parameter-rejection 400 (a newer model rejecting temperature, or an
+    # older one rejecting output_config/thinking): retry once with a body
+    # that omits every model-gated field.
+    if isinstance(response, str) and response.startswith("HTTPError 400"):
+        response = _post_json(
+            url, _anthropic_body(config, system, user, None, "minimal"), headers
+        )
+    return _anthropic_response_text(response)
+
+
+def _anthropic_response_text(response: dict | str) -> str:
+    """Extract the first text block from a Messages response.
+
+    Adaptive thinking prepends a thinking block, so we scan for the text
+    block rather than taking ``content[0]``. Error strings from
+    ``_post_json`` pass through unchanged.
+    """
     if isinstance(response, str):
         return response
     try:
-        return response["content"][0]["text"]
-    except (KeyError, IndexError, TypeError):
-        return json.dumps(response)[:240]
+        for block in response.get("content", []):
+            if isinstance(block, dict) and block.get("type") == "text":
+                return block.get("text", "")
+    except AttributeError:
+        pass
+    return json.dumps(response)[:240]
+
+
+def _anthropic_vision_body(
+    config: LlmConfig,
+    system: str,
+    content_blocks: list[dict],
+    output_schema: dict | None,
+    style: str,
+) -> dict:
+    """Like ``_anthropic_body`` but the user turn carries image + text blocks."""
+    body: dict = {
+        "model": config.model,
+        "system": system,
+        "messages": [{"role": "user", "content": content_blocks}],
+        "max_tokens": config.max_tokens,
+    }
+    if style == "adaptive":
+        body["max_tokens"] = max(config.max_tokens, 4096)
+        body["thinking"] = {"type": "adaptive"}
+        output_config: dict = {"effort": config.effort}
+        if output_schema is not None:
+            output_config["format"] = output_schema
+        body["output_config"] = output_config
+    elif style == "legacy":
+        body["temperature"] = 0.0
+    # "minimal": base body only.
+    return body
+
+
+def _call_anthropic_vision(
+    config: LlmConfig,
+    system: str,
+    content_blocks: list[dict],
+    *,
+    output_schema: dict | None = None,
+) -> str:
+    """Vision sibling of ``_call_anthropic``: same plumbing, image-aware body.
+
+    Anthropic-only — the caller must already have rejected non-anthropic
+    providers and unsupported media types. Keeps the single 400 retry that
+    self-heals a model-style misclassification (e.g. an image + adaptive
+    thinking + output_config combination the model rejects degrades to a
+    minimal body we scrape with ``_extract_first_json``).
+    """
+    base = config.base_url.rstrip("/") if config.base_url else "https://api.anthropic.com"
+    url = f"{base}/v1/messages"
+    headers = {
+        "x-api-key": config.api_key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
+    style = "adaptive" if _anthropic_uses_adaptive_thinking(config.model) else "legacy"
+    response = _post_json(
+        url, _anthropic_vision_body(config, system, content_blocks, output_schema, style), headers
+    )
+    if isinstance(response, str) and response.startswith("HTTPError 400"):
+        response = _post_json(
+            url, _anthropic_vision_body(config, system, content_blocks, None, "minimal"), headers
+        )
+    return _anthropic_response_text(response)

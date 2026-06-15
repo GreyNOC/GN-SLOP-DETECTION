@@ -883,6 +883,16 @@ def _parse_gif(data: bytes) -> MediaAnalysis:
     return analysis
 
 
+def reclassify(analysis: MediaAnalysis) -> None:
+    """Recompute score/risk/recommendation after findings were appended.
+
+    Used by the optional vision fusion (``app/core/media_vision.py``) to fold
+    a pixel-level verdict into the metadata analysis. ``_score_and_classify``
+    overwrites rather than accumulates, so this is safe to call repeatedly.
+    """
+    _score_and_classify(analysis)
+
+
 def analyze_media(data: bytes) -> MediaAnalysis:
     """Parse `data` and return a MediaAnalysis. Never raises on malformed input."""
     if not data:

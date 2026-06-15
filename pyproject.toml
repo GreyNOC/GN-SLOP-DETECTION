@@ -13,6 +13,17 @@ dependencies = [
   "python-multipart==0.0.20",
 ]
 
+[project.optional-dependencies]
+# Optional local model backend for the ModelDetector extension point
+# (app/core/model_detector.py). NOT a runtime dependency — the default
+# detector is the honest "unavailable" one. Install with:
+#   pip install '.[modeldetector]'
+# then set SLOP_MODEL_DETECTOR=transformers.
+modeldetector = [
+  "torch",
+  "transformers",
+]
+
 [project.scripts]
 gn-slop = "app.cli:main"
 

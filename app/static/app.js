@@ -61,6 +61,13 @@ const findingsTextFilter = document.querySelector("#findingsTextFilter");
 const wordMetricLabel = document.querySelector("#wordMetricLabel");
 const signalMetricLabel = document.querySelector("#signalMetricLabel");
 const codeIncludeInput = document.querySelector("#codeIncludeInput");
+const aiLlmDetails = document.querySelector("#aiLlmDetails");
+const aiLlmHint = document.querySelector("#aiLlmHint");
+const aiLlmEnable = document.querySelector("#aiLlmEnable");
+const aiLlmProvider = document.querySelector("#aiLlmProvider");
+const aiLlmModel = document.querySelector("#aiLlmModel");
+const aiLlmKey = document.querySelector("#aiLlmKey");
+const aiVerdict = document.querySelector("#aiVerdict");
 
 const TEXT_SIGNALS_HEADERS = ["Signal", "Category", "Weight", "Count", "Description"];
 const CODE_SIGNALS_HEADERS = [
@@ -158,6 +165,7 @@ function setMode(mode) {
   }
   updateCounter();
   setMetricLabels(mode);
+  updateAiLlmPanel(mode);
   if (isUrl) {
     urlInput.focus();
   } else if (isMedia && mediaInput) {
@@ -389,6 +397,7 @@ function renderMediaResult(payload) {
 
   dimensionGrid.innerHTML =
     '<div class="empty-block">Dimension scores apply to text analysis only.</div>';
+  renderAiVerdict(payload);
 }
 
 function renderResult(payload) {
@@ -414,6 +423,7 @@ function renderResult(payload) {
   renderDimensions(payload.dimensions || []);
   renderProfile(payload.profile);
   renderSignals(signals);
+  renderAiVerdict(payload);
 }
 
 async function analyzeText(event) {
@@ -456,6 +466,13 @@ async function analyzeText(event) {
       if (source) {
         formData.append("source", source);
       }
+      const ai = buildAiLlmPayload();
+      if (ai) {
+        formData.append("llm_provider", ai.provider);
+        formData.append("llm_model", ai.model);
+        formData.append("llm_api_key", ai.api_key);
+        formData.append("llm_mode", "vision");
+      }
       response = await fetch("/api/v1/analyze-media", {
         method: "POST",
         body: formData,
@@ -463,6 +480,12 @@ async function analyzeText(event) {
     } else {
       const endpoint = inputMode === "website" ? "/api/v1/analyze-url" : "/api/v1/analyze";
       const body = inputMode === "website" ? { source, url } : { source, text };
+      if (inputMode === "text") {
+        const ai = buildAiLlmPayload();
+        if (ai) {
+          body.llm = { mode: "judge_text", ...ai };
+        }
+      }
       response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -561,6 +584,92 @@ function buildLlmPayload() {
   const apiKey = (codeLlmKey?.value || "").trim();
   if (!model || !apiKey) return null;
   return { mode, provider, model, api_key: apiKey };
+}
+
+function updateAiLlmPanel(mode) {
+  if (!aiLlmDetails) return;
+  const show = mode === "text" || mode === "media";
+  aiLlmDetails.hidden = !show;
+  if (aiLlmHint) {
+    aiLlmHint.textContent =
+      mode === "media"
+        ? "Have a frontier vision model inspect the actual pixels for AI-generation artifacts. Anthropic only; PNG/JPEG/WebP/GIF. Keys are never persisted."
+        : "Get a frontier-model AI-likelihood + slop second opinion on this text. Anthropic or OpenAI-compatible. Keys are never persisted.";
+  }
+  if (!show && aiVerdict) {
+    aiVerdict.hidden = true;
+    aiVerdict.innerHTML = "";
+  }
+}
+
+function buildAiLlmPayload() {
+  if (!aiLlmEnable || !aiLlmEnable.checked) return null;
+  const provider = aiLlmProvider?.value || "anthropic";
+  const model = (aiLlmModel?.value || "").trim();
+  const apiKey = (aiLlmKey?.value || "").trim();
+  if (!model || !apiKey) return null;
+  return { provider, model, api_key: apiKey };
+}
+
+function renderAiVerdict(payload) {
+  if (!aiVerdict) return;
+  const parts = [];
+
+  if (payload.llm) {
+    const judge = payload.llm;
+    parts.push(`
+      <div class="ai-verdict-row">
+        <span class="ai-verdict-label">Frontier judge · ${escapeHtml(judge.model || "")}</span>
+        <span class="ai-verdict-badge ${escapeHtml(judge.ai_likelihood)}">AI-likelihood: ${escapeHtml(judge.ai_likelihood)}</span>
+        <span class="ai-verdict-badge ${escapeHtml(judge.slop_verdict)}">Slop: ${escapeHtml(judge.slop_verdict)}</span>
+      </div>
+      ${judge.rationale ? `<p class="ai-verdict-note">${escapeHtml(judge.rationale)}</p>` : ""}
+    `);
+  }
+
+  if (payload.model_detection && payload.model_detection.available) {
+    const md = payload.model_detection;
+    const pct = md.ai_likelihood != null ? `${Math.round(md.ai_likelihood * 100)}%` : "n/a";
+    parts.push(`
+      <div class="ai-verdict-row">
+        <span class="ai-verdict-label">Model detector · ${escapeHtml(md.method || "")}</span>
+        <span class="ai-verdict-badge">AI-likelihood: ${escapeHtml(pct)}</span>
+        ${md.raw_perplexity != null ? `<span class="ai-verdict-badge">ppl: ${escapeHtml(String(md.raw_perplexity))}</span>` : ""}
+      </div>
+    `);
+  }
+
+  if (payload.vision) {
+    const vis = payload.vision;
+    if (vis.status === "ok") {
+      const artifacts = (vis.ai_artifacts || []).map(escapeHtml).join(", ");
+      parts.push(`
+        <div class="ai-verdict-row">
+          <span class="ai-verdict-label">Vision · ${escapeHtml(vis.model || "")}</span>
+          <span class="ai-verdict-badge ${escapeHtml(vis.verdict)}">${escapeHtml(formatSignalName(vis.verdict))}</span>
+          <span class="ai-verdict-badge">confidence: ${escapeHtml(vis.confidence)}</span>
+        </div>
+        ${artifacts ? `<p class="ai-verdict-note">Artifacts: ${artifacts}</p>` : ""}
+        ${vis.rationale ? `<p class="ai-verdict-note">${escapeHtml(vis.rationale)}</p>` : ""}
+      `);
+    } else {
+      parts.push(`
+        <div class="ai-verdict-row">
+          <span class="ai-verdict-label">Vision</span>
+          <span class="ai-verdict-badge">skipped · ${escapeHtml(vis.status)}</span>
+        </div>
+        ${vis.rationale ? `<p class="ai-verdict-note">${escapeHtml(vis.rationale)}</p>` : ""}
+      `);
+    }
+  }
+
+  if (!parts.length) {
+    aiVerdict.hidden = true;
+    aiVerdict.innerHTML = "";
+    return;
+  }
+  aiVerdict.innerHTML = `<span class="ai-verdict-title">AI second opinion</span>${parts.join("")}`;
+  aiVerdict.hidden = false;
 }
 
 function setSignalsHeaders(labels) {
@@ -695,6 +804,10 @@ function renderCodeResult(payload) {
 
   dimensionGrid.innerHTML =
     '<div class="empty-block">Dimension scores apply to text analysis only.</div>';
+  if (aiVerdict) {
+    aiVerdict.hidden = true;
+    aiVerdict.innerHTML = "";
+  }
 }
 
 function buildCodeFindingRows(finding, index) {
@@ -1225,6 +1338,7 @@ if (findingsTextFilter) {
 }
 form.addEventListener("submit", analyzeText);
 updateCounter();
+updateAiLlmPanel(inputMode);
 loadThreshold();
 renderDimensions([]);
 renderProfile(null);

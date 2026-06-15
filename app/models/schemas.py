@@ -13,6 +13,70 @@ MAX_SCAN_TARGET_LENGTH: Final = 4_096
 CONTENT_PROFILES: Final = ("general", "soc", "marketing", "academic", "support")
 
 
+_LLM_ALLOWED_PROVIDERS: Final = ("openai", "anthropic")
+_LLM_ALLOWED_MODES: Final = (
+    "off",
+    "verify_findings",
+    "scan_all_files",
+    "judge_text",
+    "vision",
+)
+
+
+class LlmCheckConfig(BaseModel):
+    provider: str = Field(..., description="openai or anthropic")
+    model: str = Field(..., min_length=1, max_length=128)
+    api_key: str = Field(..., min_length=20, max_length=512)
+    base_url: str | None = Field(default=None, max_length=2048)
+    mode: str = Field(
+        default="off",
+        description="off | verify_findings | scan_all_files (code) | judge_text (text)",
+    )
+
+    @field_validator("provider")
+    @classmethod
+    def _provider_allowlist(cls, value: str) -> str:
+        if value not in _LLM_ALLOWED_PROVIDERS:
+            raise ValueError(
+                f"provider must be one of {_LLM_ALLOWED_PROVIDERS}, got {value!r}"
+            )
+        return value
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_allowlist(cls, value: str) -> str:
+        if value not in _LLM_ALLOWED_MODES:
+            raise ValueError(f"mode must be one of {_LLM_ALLOWED_MODES}, got {value!r}")
+        return value
+
+
+class LlmTextJudgmentResponse(BaseModel):
+    provider: str
+    model: str
+    ai_likelihood: str = Field(description="low | medium | high | error")
+    slop_verdict: str = Field(description="clean | review | slop | error")
+    rationale: str
+
+
+class ModelDetectionResponse(BaseModel):
+    available: bool = Field(
+        description="False = no model backend configured; ai_likelihood is then null."
+    )
+    method: str = Field(description="unavailable | perplexity | ...")
+    ai_likelihood: float | None = Field(
+        default=None,
+        description="0..1 model-based estimate (1 = more model-like). Null when unavailable.",
+    )
+    raw_perplexity: float | None = Field(
+        default=None,
+        description=(
+            "The load-bearing raw number behind a perplexity backend's estimate. "
+            "ai_likelihood is an uncalibrated heuristic mapping of this value."
+        ),
+    )
+    detail: str = ""
+
+
 class AnalyzeRequest(BaseModel):
     text: str = Field(
         ...,
@@ -28,6 +92,10 @@ class AnalyzeRequest(BaseModel):
     profile: str = Field(
         default="general",
         description="Content profile for scoring tweaks: " + " | ".join(CONTENT_PROFILES),
+    )
+    llm: LlmCheckConfig | None = Field(
+        default=None,
+        description="Optional BYO-LLM second opinion. Set mode='judge_text' to run it.",
     )
 
 
@@ -121,6 +189,14 @@ class AnalyzeResponse(BaseModel):
         le=1.0,
         description="Engine confidence in the composite score (lower for very short inputs).",
     )
+    llm: LlmTextJudgmentResponse | None = Field(
+        default=None,
+        description="Optional frontier-model second opinion (present only when requested).",
+    )
+    model_detection: ModelDetectionResponse | None = Field(
+        default=None,
+        description="Optional model-based AI-likelihood estimate (present only when a backend is configured).",
+    )
 
 
 class BatchAnalyzeRequest(BaseModel):
@@ -144,6 +220,21 @@ class MediaFinding(BaseModel):
     )
 
 
+class MediaVisionJudgmentResponse(BaseModel):
+    provider: str
+    model: str
+    verdict: str = Field(
+        description="likely_ai_generated | likely_authentic | uncertain | error"
+    )
+    confidence: str = Field(description="low | medium | high | error")
+    ai_artifacts: list[str] = Field(default_factory=list)
+    rationale: str
+    status: str = Field(
+        default="ok",
+        description="ok | skipped_provider | unsupported | oversize | error",
+    )
+
+
 class MediaAnalysisResponse(BaseModel):
     source: str | None = None
     file_name: str | None = None
@@ -164,34 +255,10 @@ class MediaAnalysisResponse(BaseModel):
     recommendation: str
     parse_status: str = Field(default="ok", description="ok | unsupported | malformed | parser_error")
     parse_warning: str | None = None
-
-
-_LLM_ALLOWED_PROVIDERS: Final = ("openai", "anthropic")
-_LLM_ALLOWED_MODES: Final = ("off", "verify_findings", "scan_all_files")
-
-
-class LlmCheckConfig(BaseModel):
-    provider: str = Field(..., description="openai or anthropic")
-    model: str = Field(..., min_length=1, max_length=128)
-    api_key: str = Field(..., min_length=20, max_length=512)
-    base_url: str | None = Field(default=None, max_length=2048)
-    mode: str = Field(default="off", description="off | verify_findings | scan_all_files")
-
-    @field_validator("provider")
-    @classmethod
-    def _provider_allowlist(cls, value: str) -> str:
-        if value not in _LLM_ALLOWED_PROVIDERS:
-            raise ValueError(
-                f"provider must be one of {_LLM_ALLOWED_PROVIDERS}, got {value!r}"
-            )
-        return value
-
-    @field_validator("mode")
-    @classmethod
-    def _mode_allowlist(cls, value: str) -> str:
-        if value not in _LLM_ALLOWED_MODES:
-            raise ValueError(f"mode must be one of {_LLM_ALLOWED_MODES}, got {value!r}")
-        return value
+    vision: MediaVisionJudgmentResponse | None = Field(
+        default=None,
+        description="Optional frontier vision pass (present only when requested).",
+    )
 
 
 class CodeScanRequest(BaseModel):
