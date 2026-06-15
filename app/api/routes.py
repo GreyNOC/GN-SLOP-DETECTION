@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from app.core.code_scanner import (
     Confidence,
@@ -13,7 +14,7 @@ from app.core.code_scanner import (
     ScanTargetType,
     scan_target,
 )
-from app.core.code_scanner.llm import LlmConfig, scan_whole_file, verify_finding
+from app.core.code_scanner.llm import LlmConfig, judge_text, scan_whole_file, verify_finding
 from app.core.code_scanner.model import Finding, Severity
 from app.core.code_scanner.sarif import to_sarif
 from app.core.code_scanner.scanner import ScanTargetForbidden
@@ -21,6 +22,8 @@ from app.core.code_scanner.sources import LocalPathSource
 from app.core.code_scanner.walker import walk_collect
 from app.core.detector import SlopDetector
 from app.core.media_detector import analyze_media
+from app.core.media_vision import fuse_vision_into_analysis, judge_media_image
+from app.core.model_detector import select_model_detector
 from app.core.settings import get_settings
 from app.core.web_ingest import WebsiteFetchError, fetch_website_text
 from app.models.schemas import (
@@ -36,8 +39,12 @@ from app.models.schemas import (
     CodeScanResponse,
     ContentProfile,
     Dimension,
+    LlmCheckConfig,
+    LlmTextJudgmentResponse,
     MediaAnalysisResponse,
     MediaFinding,
+    MediaVisionJudgmentResponse,
+    ModelDetectionResponse,
     Signal,
     SignalMatch,
     WebsiteMetadata,
@@ -45,6 +52,9 @@ from app.models.schemas import (
 
 router = APIRouter(prefix="/api/v1", tags=["analysis"])
 detector = SlopDetector()
+# Resolved once at import from SLOP_MODEL_DETECTOR. Default = unavailable
+# (no extra installed / env unset), so default responses carry no estimate.
+_model_detector = select_model_detector(None)
 
 
 def _signal_to_pydantic(signal) -> Signal:
@@ -61,12 +71,59 @@ def _signal_to_pydantic(signal) -> Signal:
     )
 
 
+def _maybe_judge_text(request: AnalyzeRequest) -> LlmTextJudgmentResponse | None:
+    """Run the optional frontier-model text judge when the caller asks for it.
+
+    Only fires when an ``llm`` block is present with ``mode == "judge_text"``
+    and a key. Reuses the same hardened seam as the code scanner.
+    """
+    cfg = getattr(request, "llm", None)
+    if cfg is None or cfg.mode != "judge_text" or not cfg.api_key:
+        return None
+    config = LlmConfig(
+        provider=cfg.provider,
+        model=cfg.model,
+        api_key=cfg.api_key,
+        base_url=cfg.base_url or "",
+    )
+    judgment = judge_text(config, request.text)
+    return LlmTextJudgmentResponse(
+        provider=judgment.provider,
+        model=judgment.model,
+        ai_likelihood=judgment.ai_likelihood,
+        slop_verdict=judgment.slop_verdict,
+        rationale=judgment.rationale,
+    )
+
+
+def _model_detection_response(result) -> ModelDetectionResponse | None:
+    detection = getattr(result, "model_detection", None)
+    if detection is None:
+        return None
+    extra = getattr(detection, "extra", None) or {}
+    raw_perplexity = extra.get("perplexity")
+    return ModelDetectionResponse(
+        available=detection.available,
+        method=detection.method,
+        ai_likelihood=detection.ai_likelihood,
+        raw_perplexity=raw_perplexity if isinstance(raw_perplexity, int | float) else None,
+        detail=detection.detail,
+    )
+
+
 def to_response(
     request: AnalyzeRequest,
     input_type: str = "text",
     website: WebsiteMetadata | None = None,
 ) -> AnalyzeResponse:
-    result = detector.analyze(request.text, profile=getattr(request, "profile", "general"))
+    # Only run a model detector that is actually available, so default
+    # responses (no backend configured) are unchanged.
+    detector_arg = _model_detector if _model_detector.is_available() else None
+    result = detector.analyze(
+        request.text,
+        profile=getattr(request, "profile", "general"),
+        model_detector=detector_arg,
+    )
     return AnalyzeResponse(
         source=request.source,
         input_type=input_type,
@@ -81,6 +138,8 @@ def to_response(
         content_profile=result.content_profile,
         sample_quality=result.sample_quality,
         confidence=result.confidence,
+        llm=_maybe_judge_text(request),
+        model_detection=_model_detection_response(result),
     )
 
 
@@ -127,12 +186,67 @@ def batch_analyze(request: BatchAnalyzeRequest) -> BatchAnalyzeResponse:
     return BatchAnalyzeResponse(results=[to_response(item) for item in request.items])
 
 
+def _maybe_vision_media(
+    data: bytes,
+    analysis,  # MediaAnalysis — mutated in place by fusion
+    *,
+    provider: str | None,
+    model: str | None,
+    api_key: str | None,
+    base_url: str | None,
+    mode: str,
+) -> MediaVisionJudgmentResponse | None:
+    """Run the optional frontier vision pass and fuse it into the analysis.
+
+    Opt-in: only fires for mode=='vision' with a provider, model, and key.
+    No key => no network. The vision judgment is surfaced verbatim and the
+    fused (possibly re-scored) analysis is read by the caller afterwards.
+    """
+    if mode != "vision":
+        return None
+    # Run the flat multipart fields through the same validator the JSON
+    # surface uses (length caps, provider allowlist, api-key floor) instead
+    # of re-implementing a weaker subset inline.
+    try:
+        checked = LlmCheckConfig(
+            provider=provider or "",
+            model=model or "",
+            api_key=api_key or "",
+            base_url=base_url,
+            mode="vision",
+        )
+    except ValidationError as error:
+        raise HTTPException(status_code=422, detail=f"Invalid llm_* fields: {error}") from error
+    config = LlmConfig(
+        provider=checked.provider,
+        model=checked.model,
+        api_key=checked.api_key,
+        base_url=checked.base_url or "",
+    )
+    judgment = judge_media_image(config, data, analysis.format)
+    fuse_vision_into_analysis(analysis, judgment)
+    return MediaVisionJudgmentResponse(
+        provider=judgment.provider,
+        model=judgment.model,
+        verdict=judgment.verdict,
+        confidence=judgment.confidence,
+        ai_artifacts=list(judgment.ai_artifacts),
+        rationale=judgment.rationale,
+        status=judgment.status,
+    )
+
+
 @router.post("/analyze-media", response_model=MediaAnalysisResponse)
 async def analyze_media_upload(
     file: UploadFile = File(  # noqa: B008 - FastAPI dependency marker, not a default value
         ..., description="Image or video file to scan for provenance markers."
     ),
     source: str | None = Form(default=None),  # noqa: B008 - FastAPI dependency marker
+    llm_provider: str | None = Form(default=None),  # noqa: B008
+    llm_model: str | None = Form(default=None),  # noqa: B008
+    llm_api_key: str | None = Form(default=None),  # noqa: B008
+    llm_base_url: str | None = Form(default=None),  # noqa: B008
+    llm_mode: str = Form(default="off"),  # noqa: B008
 ) -> MediaAnalysisResponse:
     settings = get_settings()
     if source is not None and len(source) > MAX_SOURCE_LENGTH:
@@ -151,6 +265,18 @@ async def analyze_media_upload(
         raise HTTPException(status_code=422, detail="Uploaded media is empty.")
 
     analysis = analyze_media(data)
+    # Optional frontier vision pass. Mutates `analysis` in place (appends a
+    # finding and re-scores) when an affirmative AI verdict comes back, so
+    # the response below reads the fused score/risk/recommendation.
+    vision = _maybe_vision_media(
+        data,
+        analysis,
+        provider=llm_provider,
+        model=llm_model,
+        api_key=llm_api_key,
+        base_url=llm_base_url,
+        mode=llm_mode,
+    )
     file_name = (file.filename or "").strip()
     if len(file_name) > MAX_MEDIA_FILENAME_LENGTH:
         file_name = file_name[: MAX_MEDIA_FILENAME_LENGTH - 1] + "…"
@@ -174,6 +300,7 @@ async def analyze_media_upload(
         recommendation=analysis.recommendation,
         parse_status=analysis.parse_status,
         parse_warning=analysis.parse_warning,
+        vision=vision,
     )
 
 

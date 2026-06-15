@@ -226,7 +226,7 @@
                   <option value="anthropic">Anthropic Messages</option>
                 </select>
                 <label class="field-label" for="codeLlmModel">Model</label>
-                <input class="source-input" id="codeLlmModel" type="text" placeholder="e.g. gpt-4o-mini or claude-3-5-sonnet-latest" />
+                <input class="source-input" id="codeLlmModel" type="text" placeholder="e.g. claude-opus-4-8, claude-sonnet-4-6, or gpt-4o-mini" />
                 <label class="field-label" for="codeLlmKey">API key</label>
                 <input class="source-input" id="codeLlmKey" type="password" autocomplete="off" />
               </details>
@@ -236,6 +236,27 @@
                 <strong>This is a heuristic scanner.</strong> It surfaces patterns associated with backdoors and exploit primitives, not novel zero-days.
               </p>
             </div>
+
+            <details class="code-llm-details" id="aiLlmDetails" hidden>
+              <summary>Frontier LLM second opinion (optional, off by default)</summary>
+              <p class="field-hint" id="aiLlmHint">
+                Send this content to your own API key for a frontier-model second opinion.
+                Keys are never persisted — they're sent with the request and forgotten.
+              </p>
+              <label class="checkbox-row" for="aiLlmEnable">
+                <input type="checkbox" id="aiLlmEnable" />
+                Enable second opinion
+              </label>
+              <label class="field-label" for="aiLlmProvider">Provider</label>
+              <select class="source-input" id="aiLlmProvider">
+                <option value="anthropic">Anthropic Messages</option>
+                <option value="openai">OpenAI-compatible</option>
+              </select>
+              <label class="field-label" for="aiLlmModel">Model</label>
+              <input class="source-input" id="aiLlmModel" type="text" placeholder="e.g. claude-opus-4-8 or claude-sonnet-4-6" />
+              <label class="field-label" for="aiLlmKey">API key</label>
+              <input class="source-input" id="aiLlmKey" type="password" autocomplete="off" />
+            </details>
 
             <div class="form-actions">
               <button class="primary-button" id="analyzeButton" type="submit">
@@ -274,6 +295,8 @@
             <div class="recommendation" id="recommendation">
               Run an analysis to populate the review profile.
             </div>
+
+            <div class="ai-verdict" id="aiVerdict" hidden></div>
 
             <div class="threshold-row">
               <span>Alert threshold</span>

@@ -687,6 +687,85 @@ textarea:focus {
   line-height: 1.55;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  color: var(--muted-strong);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.ai-verdict {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.ai-verdict-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.ai-verdict-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-verdict-label {
+  font-size: 0.82rem;
+  color: var(--muted-strong);
+  margin-right: 4px;
+}
+
+.ai-verdict-badge {
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--line-strong);
+  color: var(--text);
+  background: var(--surface-strong);
+  white-space: nowrap;
+}
+
+.ai-verdict-badge.low,
+.ai-verdict-badge.clean,
+.ai-verdict-badge.likely_authentic {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.ai-verdict-badge.medium,
+.ai-verdict-badge.review,
+.ai-verdict-badge.uncertain {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+.ai-verdict-badge.high,
+.ai-verdict-badge.slop,
+.ai-verdict-badge.likely_ai_generated {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.ai-verdict-note {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--muted-strong);
+  overflow-wrap: anywhere;
+}
+
 .threshold-row {
   display: flex;
   align-items: center;

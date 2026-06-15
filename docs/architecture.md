@@ -24,9 +24,35 @@ The current algorithm builds a complete slop picture from:
 - Profile metrics: sentence count, average sentence length, specificity density, evidence density, repetition density, links, numeric details, and citations.
 - Dimension scores: normalized review scores that help analysts see which part of the content needs attention.
 
+## Model-based detection (ModelDetector)
+
+The rule engine scores *style*. A model-based detector scores
+*predictability* — how well a language model anticipates the text, the
+signal behind DetectGPT / Fast-DetectGPT / Binoculars. The pluggable
+`ModelDetector` interface lives in `app/core/model_detector.py`:
+
+- **Default is honest.** `UnavailableModelDetector` ships as the default and
+  emits **no** number. A zero-dependency statistical proxy was rejected
+  because it would either re-measure repetition the rule engine already
+  captures or be a noisy stand-in for perplexity — calling that an
+  "AI-likelihood score" would be dishonest.
+- **Optional local backend.** `TransformersDetector` computes a genuine
+  mean-token perplexity under a local causal LM and maps it to a likelihood
+  (an explicit, uncalibrated heuristic; the raw perplexity is always
+  surfaced). It is opt-in behind the `[modeldetector]` pip extra
+  (`pip install '.[modeldetector]'`) and the `SLOP_MODEL_DETECTOR=transformers`
+  env var; torch/transformers are imported lazily, so the default install
+  carries no extra dependency.
+- **No hosted backend.** Anthropic exposes no token logprobs, and current
+  OpenAI chat models no longer return prompt-token logprobs via `echo`, so a
+  hosted log-likelihood backend is intentionally not shipped.
+- The estimate is surfaced as explainable metadata only — it is **not**
+  folded into the rule-based composite score.
+
 ## Extension points
 
-- Add a `ModelDetector` interface for local or hosted ML models.
+- Add hosted log-likelihood backends to `ModelDetector` if a provider
+  exposes prompt-token logprobs.
 - Add source reputation lookups for fetched domains.
 - Store analysis events in Postgres or SQLite.
 - Add analyst feedback to improve signal weighting.

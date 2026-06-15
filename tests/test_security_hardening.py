@@ -16,9 +16,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.code_scanner import ScanRequest, ScanTargetType, scan_target
+from app.core.code_scanner import llm as llm_module
 from app.core.code_scanner.llm import (
     LlmBaseUrlError,
     LlmConfig,
+    _post_json,
+    _resolve_pinned_ip,
     _validate_base_url,
     verify_finding,
 )
@@ -99,6 +102,48 @@ def test_llm_base_url_validation_rejects_metadata_service() -> None:
 def test_llm_base_url_validation_rejects_userinfo() -> None:
     with pytest.raises(LlmBaseUrlError):
         _validate_base_url("https://user:pw@api.openai.com")
+
+
+def _fake_getaddrinfo(ip: str):
+    import socket as _socket
+
+    def _inner(*_args, **_kwargs):
+        return [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    return _inner
+
+
+def test_resolve_pinned_ip_returns_public_address(monkeypatch) -> None:
+    monkeypatch.setattr(llm_module.socket, "getaddrinfo", _fake_getaddrinfo("93.184.216.34"))
+    assert _resolve_pinned_ip("example.com", "https") == "93.184.216.34"
+
+
+def test_resolve_pinned_ip_rejects_private_address(monkeypatch) -> None:
+    monkeypatch.setattr(llm_module.socket, "getaddrinfo", _fake_getaddrinfo("10.0.0.5"))
+    with pytest.raises(LlmBaseUrlError):
+        _resolve_pinned_ip("evil.example", "https")
+
+
+def test_resolve_pinned_ip_allows_loopback_name() -> None:
+    assert _resolve_pinned_ip("localhost", "http") == "127.0.0.1"
+
+
+def test_post_json_does_not_connect_on_dns_rebind(monkeypatch) -> None:
+    # A host that resolves to a private/metadata address must be refused at
+    # connect time — the socket is pinned to the validated IP, so a rebind to
+    # 169.254.169.254 never gets a connection.
+    monkeypatch.setattr(llm_module.socket, "getaddrinfo", _fake_getaddrinfo("169.254.169.254"))
+    connected: list = []
+
+    def _no_connect(*args, **kwargs):  # noqa: ANN002, ANN003
+        connected.append(args)
+        raise AssertionError("must not connect to a rebound address")
+
+    monkeypatch.setattr(llm_module.socket, "create_connection", _no_connect)
+    result = _post_json("https://evil.example/v1/messages", {"x": 1}, {"x-api-key": "secret"})
+    assert isinstance(result, str)
+    assert result.startswith("URLError")
+    assert connected == []  # no socket was ever opened
 
 
 def test_llm_verify_finding_returns_error_for_bad_base_url() -> None:
