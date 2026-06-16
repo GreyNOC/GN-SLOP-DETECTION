@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from statistics import mean, pstdev
 from typing import TYPE_CHECKING
 
+from app.core.adversarial import normalize_adversarial, scan_evasion
+from app.core.learned_weights import LearnedWeights, scaled_activation
+
 if TYPE_CHECKING:
     from app.core.model_detector import ModelDetector, ModelDetectorResult
 
@@ -339,6 +342,18 @@ class SlopDetector:
     MIN_WORDS_FOR_TTR = 80
     TTR_FLAG_THRESHOLD = 0.45
 
+    def __init__(self, learned_weights: LearnedWeights | None = None) -> None:
+        """Optionally score with learned, glass-box weights instead of the
+        hand-tuned defaults.
+
+        ``learned_weights`` may be passed explicitly; if omitted, the engine
+        looks for a ``SLOP_LEARNED_WEIGHTS`` file via the env. Either way the
+        default (nothing configured) keeps the byte-identical hand-tuned
+        behavior, and the signal list/dimensions are unchanged — only the
+        composite score's combination rule swaps to the fitted logistic.
+        """
+        self._learned = learned_weights if learned_weights is not None else LearnedWeights.from_env()
+
     def analyze(
         self,
         text: str,
@@ -434,6 +449,32 @@ class SlopDetector:
                 DetectionSignal(
                     "em_dash_overuse", "authenticity", 0.16, em_dash_count,
                     "Heavy em/en-dash usage relative to length is a frequent AI pattern",
+                )
+            )
+
+        # Character-level evasion (homoglyphs / zero-width / bidi). Scored on
+        # RAW text, before normalize_for_matching scrubs it. This is a
+        # deliberate-manipulation tell, not a quality one: a high-confidence,
+        # near-zero-false-positive signal that someone tried to hide the text
+        # from an exact-match detector.
+        evasion = scan_evasion(raw)
+        if evasion.is_evasive:
+            tells: list[str] = []
+            if evasion.invisible_chars:
+                tells.append(f"{evasion.invisible_chars} zero-width/invisible char(s)")
+            if evasion.bidi_controls:
+                tells.append(f"{evasion.bidi_controls} bidi control(s)")
+            if evasion.mixed_script_words:
+                sample = ", ".join(evasion.examples[:3])
+                tells.append(f"{evasion.mixed_script_words} mixed-script word(s): {sample}")
+            matches = tuple(SignalMatch(term="evasion", excerpt=tell) for tell in tells)
+            signals.append(
+                DetectionSignal(
+                    "evasion_obfuscation", "manipulation", 0.22,
+                    max(evasion.invisible_chars + evasion.bidi_controls + evasion.mixed_script_words, 1),
+                    "Text uses homoglyphs, zero-width, or bidi characters to evade "
+                    "exact-match detection — a deliberate-obfuscation tell",
+                    matches,
                 )
             )
 
@@ -601,8 +642,9 @@ class SlopDetector:
             signals = adjusted
 
         repetition_density = self._repetition_density(words)
+        algorithm = self.ALGORITHM_VERSION + ("+learned" if self._learned is not None else "")
         profile_content = ContentProfile(
-            algorithm=self.ALGORITHM_VERSION,
+            algorithm=algorithm,
             sentence_count=len(sentences),
             average_sentence_length=round(mean(sentence_lengths), 2) if sentence_lengths else 0.0,
             specificity_ratio=round(specificity_ratio, 3),
@@ -640,6 +682,11 @@ class SlopDetector:
         )
 
     def _normalize_for_matching(self, text: str) -> str:
+        # First defeat character-level evasion (zero-width splices, homoglyph
+        # substitution, bidi controls, exotic spaces) so an attacker cannot
+        # hide a flagged word from the lexicons. NFKC does NOT fold cross-script
+        # homoglyphs, so this step is additive, not redundant.
+        text = normalize_adversarial(text)
         # NFKC folds presentational variants (full-width digits, ligatures) into
         # base forms so curly-quoted or fancy text still matches the rule sets.
         text = unicodedata.normalize("NFKC", text)
@@ -913,16 +960,16 @@ class SlopDetector:
     def _score(self, signals: list[DetectionSignal], word_count: int) -> float:
         if word_count == 0:
             return 0.0
+        # Learned, glass-box scoring (opt-in): a fitted logistic over the same
+        # per-signal activations. Default stays the hand-tuned additive rule.
+        if self._learned is not None:
+            return self._learned.score(signals)
         # Soft saturation: each additional hit contributes half as much as the
         # previous one and the per-signal contribution is capped, so a single
         # noisy detector cannot dominate the composite score.
         weighted = 0.0
         for signal in signals:
-            if signal.count <= 1:
-                scaled = 1.0
-            else:
-                scaled = min(1.0 + 0.5 * (signal.count - 1), 4.0)
-            weighted += signal.weight * scaled
+            weighted += signal.weight * scaled_activation(signal.count)
         length_adjustment = min(word_count / 800, 0.08)
         return round(min(weighted + length_adjustment, 1.0), 3)
 
@@ -939,12 +986,9 @@ class SlopDetector:
             "authenticity": 0.0,
         }
         for signal in signals:
-            if signal.count <= 1:
-                scaled = 1.0
-            else:
-                scaled = min(1.0 + 0.5 * (signal.count - 1), 4.0)
             category_scores[signal.category] = (
-                category_scores.get(signal.category, 0.0) + signal.weight * scaled
+                category_scores.get(signal.category, 0.0)
+                + signal.weight * scaled_activation(signal.count)
             )
 
         dimension_specs = [
