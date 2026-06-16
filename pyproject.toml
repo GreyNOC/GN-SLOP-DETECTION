@@ -1,6 +1,6 @@
 [project]
 name = "gn-slop-detection"
-version = "0.6.0"
+version = "0.7.0"
 description = "GreyNOC slop detection API and CLI"
 requires-python = ">=3.11"
 dependencies = [
@@ -14,11 +14,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Optional local model backend for the ModelDetector extension point
+# Optional local model backends for the ModelDetector extension point
 # (app/core/model_detector.py). NOT a runtime dependency — the default
 # detector is the honest "unavailable" one. Install with:
 #   pip install '.[modeldetector]'
-# then set SLOP_MODEL_DETECTOR=transformers.
+# then set SLOP_MODEL_DETECTOR=binoculars  (SOTA zero-shot, two models), or
+#        SLOP_MODEL_DETECTOR=transformers (single-model perplexity baseline).
 modeldetector = [
   "torch",
   "transformers",
@@ -35,7 +36,7 @@ build-backend = "setuptools.build_meta"
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["static/*"]
+app = ["static/*", "eval/data/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

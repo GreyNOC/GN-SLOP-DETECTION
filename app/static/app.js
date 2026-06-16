@@ -68,6 +68,8 @@ const aiLlmProvider = document.querySelector("#aiLlmProvider");
 const aiLlmModel = document.querySelector("#aiLlmModel");
 const aiLlmKey = document.querySelector("#aiLlmKey");
 const aiVerdict = document.querySelector("#aiVerdict");
+const dialLabel = document.querySelector("#dialLabel");
+const mediaNote = document.querySelector("#mediaNote");
 
 const TEXT_SIGNALS_HEADERS = ["Signal", "Category", "Weight", "Count", "Description"];
 const CODE_SIGNALS_HEADERS = [
@@ -397,6 +399,18 @@ function renderMediaResult(payload) {
 
   dimensionGrid.innerHTML =
     '<div class="empty-block">Dimension scores apply to text analysis only.</div>';
+
+  // Honest framing: the media score is a provenance/marker score, not an
+  // AI-probability. A low score means "no embedded markers found", which is
+  // common for stripped/exported files and is NOT an authenticity verdict.
+  if (dialLabel) dialLabel.textContent = "Provenance score";
+  if (mediaNote) {
+    mediaNote.innerHTML = payload.vision
+      ? "<strong>Metadata + vision scan.</strong> The score above reflects only provenance markers embedded in the file (C2PA, SynthID, generator fingerprints), not the pixels. See the vision verdict below for the pixel-level opinion."
+      : "<strong>Metadata scan only.</strong> The score above reflects only provenance markers embedded in the file (C2PA, SynthID, generator fingerprints), not the pixels. A low score means none were found — common for screenshots, exports, and re-saved images — and is <strong>not</strong> a verdict that the image is authentic. Enable the frontier vision pass below for a pixel-level opinion.";
+    mediaNote.hidden = false;
+  }
+
   renderAiVerdict(payload);
 }
 
@@ -419,6 +433,7 @@ function renderResult(payload) {
   setSignalsHeaders(TEXT_SIGNALS_HEADERS);
   if (findingsActions) findingsActions.hidden = true;
   lastCodePayload = null;
+  resetScoreFraming();
   renderSource(payload);
   renderDimensions(payload.dimensions || []);
   renderProfile(payload.profile);
@@ -609,6 +624,14 @@ function buildAiLlmPayload() {
   const apiKey = (aiLlmKey?.value || "").trim();
   if (!model || !apiKey) return null;
   return { provider, model, api_key: apiKey };
+}
+
+function resetScoreFraming() {
+  if (dialLabel) dialLabel.textContent = "Composite score";
+  if (mediaNote) {
+    mediaNote.hidden = true;
+    mediaNote.innerHTML = "";
+  }
 }
 
 function renderAiVerdict(payload) {
@@ -804,6 +827,7 @@ function renderCodeResult(payload) {
 
   dimensionGrid.innerHTML =
     '<div class="empty-block">Dimension scores apply to text analysis only.</div>';
+  resetScoreFraming();
   if (aiVerdict) {
     aiVerdict.hidden = true;
     aiVerdict.innerHTML = "";

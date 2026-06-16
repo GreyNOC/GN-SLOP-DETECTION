@@ -54,13 +54,23 @@ _ANTHROPIC_VISION_MEDIA_TYPES: Final[dict[MediaFormat, str]] = {
 _VISION_MAX_BYTES: Final = 5 * 1024 * 1024
 
 _VISION_SYSTEM_PROMPT = (
-    "You are a forensic image analyst. You will receive ONE image. Inspect the "
-    "actual pixels for tell-tale artifacts of AI image generation: malformed "
-    "hands or fingers, garbled or nonsensical text and fine print, impossible "
-    "reflections, inconsistent lighting or shadows, repeated or tiled textures, "
-    "melted or fused objects, and anatomically impossible geometry. Be "
-    "conservative: real photos have noise, motion blur, and imperfections that "
-    "are NOT AI tells. Respond with JSON only, matching this schema exactly:\n"
+    "You are a forensic image analyst. You will receive ONE image — it may be a "
+    "photograph, a digital render, a logo, or graphic art. Judge whether it was "
+    "AI-generated, looking for tells across BOTH categories:\n"
+    "  Photographic tells: malformed hands or fingers, garbled or nonsensical "
+    "text and fine print, impossible reflections, inconsistent lighting or "
+    "shadows, repeated or tiled textures, melted or fused objects, anatomically "
+    "impossible geometry.\n"
+    "  Art / render / graphic-design tells: unnaturally perfect symmetry or "
+    "radial patterns, airbrushed 'synthwave' / 'concept-art' gradients, "
+    "plasticky or uniform surface sheen, decorative-but-meaningless equations, "
+    "glyphs, UI, gauges, or labels, hallucinated or inconsistent typography, and "
+    "a generic glossy 'AI house style'.\n"
+    "Be conservative: real photos have sensor noise and motion blur, and skilled "
+    "human artists can produce clean, symmetric work — neither alone proves AI. "
+    "Weigh the overall balance of evidence. 'likely_authentic' means a human-made "
+    "or camera-captured image; 'likely_ai_generated' means a model produced it. "
+    "Respond with JSON only, matching this schema exactly:\n"
     '{"verdict": "likely_ai_generated"|"likely_authentic"|"uncertain", '
     '"confidence": "low"|"medium"|"high", '
     '"ai_artifacts": ["<short artifact phrase>", ...], '
