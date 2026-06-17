@@ -36,18 +36,68 @@ signal behind DetectGPT / Fast-DetectGPT / Binoculars. The pluggable
   because it would either re-measure repetition the rule engine already
   captures or be a noisy stand-in for perplexity — calling that an
   "AI-likelihood score" would be dishonest.
-- **Optional local backend.** `TransformersDetector` computes a genuine
-  mean-token perplexity under a local causal LM and maps it to a likelihood
-  (an explicit, uncalibrated heuristic; the raw perplexity is always
-  surfaced). It is opt-in behind the `[modeldetector]` pip extra
-  (`pip install '.[modeldetector]'`) and the `SLOP_MODEL_DETECTOR=transformers`
-  env var; torch/transformers are imported lazily, so the default install
-  carries no extra dependency.
+- **Optional local backends (weakest to strongest).**
+  - `TransformersDetector` (`SLOP_MODEL_DETECTOR=transformers`) — single-model
+    mean-token perplexity under a local causal LM. The simplest predictability
+    signal; surfaces the raw perplexity, maps it to a likelihood via an
+    explicit, uncalibrated heuristic.
+  - `BinocularsDetector` (`SLOP_MODEL_DETECTOR=binoculars`) — the current best
+    **zero-shot** method (Hans et al. 2024). It loads two same-tokenizer LMs (an
+    observer and a performer) and scores `B = CE_observer / cross-perplexity`,
+    which cancels the prompt/topic component that contaminates raw perplexity.
+    Defaults to the lightweight `gpt2` + `distilgpt2` pair (shared GPT-2
+    tokenizer); a larger same-family base/instruct pair (e.g. Falcon-7B /
+    Falcon-7B-instruct) via `SLOP_BINOCULARS_OBSERVER` / `_PERFORMER` reaches the
+    paper's numbers. Raw `B` is always surfaced; the likelihood mapping is an
+    uncalibrated heuristic for the default pair — calibrate it with `app/eval`.
+  - Both are opt-in behind the `[modeldetector]` pip extra
+    (`pip install '.[modeldetector]'`); torch/transformers are imported lazily,
+    so the default install carries no extra dependency.
 - **No hosted backend.** Anthropic exposes no token logprobs, and current
   OpenAI chat models no longer return prompt-token logprobs via `echo`, so a
   hosted log-likelihood backend is intentionally not shipped.
 - The estimate is surfaced as explainable metadata only — it is **not**
   folded into the rule-based composite score.
+
+## Evaluation harness (app/eval)
+
+Detection thresholds and signal weights were historically hand-tuned. The
+`app/eval` package makes them **measurable** — it is pure-Python (no numpy /
+sklearn), an offline analyst/CI tool, never invoked at request time:
+
+- `corpus.py` loads a labeled JSONL corpus (`text` + `human`/`ai` label, with
+  optional `domain` / `model` for slicing).
+- `metrics.py` computes ROC-AUC, **TPR at fixed FPR** (1% / 5% / 10% — the
+  number that matters for a review tool, since false positives on human writing
+  are the cardinal error), precision/recall/F1, and calibration error
+  (ECE/Brier), all by hand so the numbers are auditable.
+- `runner.py` scores a corpus with any engine via adapters (the rule engine, a
+  `ModelDetector`); `calibrate.py` fits Platt scaling and can recover the exact
+  `(_PPL_MIDPOINT, _PPL_STEEPNESS)` for the perplexity map.
+- A small **seed corpus** ships under `app/eval/data/` purely as a smoke test —
+  it is NOT a benchmark (see its README). Run: `python -m app.eval report` /
+  `calibrate` / `learn-weights`.
+
+## Adversarial robustness (app/core/adversarial.py)
+
+Character-level evasion (zero-width splices, Cyrillic/Greek homoglyphs, bidi
+controls, exotic whitespace) defeats an exact-match lexicon while looking
+unchanged to a reader. The module both **detects** the obfuscation (surfaced as
+an `evasion_obfuscation` signal — mixed-script words and bidi controls are
+near-zero-false-positive tells) and **defeats** it: the engine de-obfuscates
+before matching, so the underlying slop signals still fire. NFKC does not fold
+cross-script homoglyphs, so this is additive to the existing normalization.
+
+## Learned glass-box weights (app/core/learned_weights.py)
+
+The hand-tuned per-signal weights can be replaced by weights **learned** from a
+labeled corpus while staying fully explainable — a plain logistic regression
+whose coefficients are readable numbers. `python -m app.eval learn-weights`
+fits them; pointing `SLOP_LEARNED_WEIGHTS` at the output JSON swaps the
+composite's combination rule to the fitted logistic. Default (nothing
+configured) is byte-identical to the hand-tuned engine. A fit on a small corpus
+overfits, so the bundled default stays hand-tuned and the output records its
+training-set size.
 
 ## Extension points
 
