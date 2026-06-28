@@ -6,6 +6,11 @@ MAX_TEXT_LENGTH: Final = 200_000
 MAX_SOURCE_LENGTH: Final = 256
 MAX_URL_LENGTH: Final = 2_048
 MAX_BATCH_ITEMS: Final = 25
+# Aggregate text budget for a single /batch request. The per-item cap
+# (MAX_TEXT_LENGTH) times MAX_BATCH_ITEMS would allow ~5 MB of synchronous
+# detector work per request; this bounds the total so one request cannot
+# monopolize the worker for seconds.
+MAX_BATCH_TOTAL_CHARS: Final = 1_000_000
 MAX_MEDIA_FILENAME_LENGTH: Final = 256
 MAX_SCAN_TARGET_LENGTH: Final = 4_096
 
@@ -201,6 +206,17 @@ class AnalyzeResponse(BaseModel):
 
 class BatchAnalyzeRequest(BaseModel):
     items: list[AnalyzeRequest] = Field(..., min_length=1, max_length=MAX_BATCH_ITEMS)
+
+    @field_validator("items")
+    @classmethod
+    def _bound_total_work(cls, items: list[AnalyzeRequest]) -> list[AnalyzeRequest]:
+        total = sum(len(item.text) for item in items)
+        if total > MAX_BATCH_TOTAL_CHARS:
+            raise ValueError(
+                f"Batch total text ({total} chars) exceeds the "
+                f"{MAX_BATCH_TOTAL_CHARS}-char per-request budget."
+            )
+        return items
 
 
 class BatchAnalyzeResponse(BaseModel):

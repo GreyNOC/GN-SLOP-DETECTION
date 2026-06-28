@@ -27,6 +27,7 @@ millions.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -39,6 +40,12 @@ def _validate(scores: Sequence[Number], labels: Sequence[int]) -> None:
     for label in labels:
         if label not in (0, 1):
             raise ValueError(f"labels must be 0 or 1, got {label!r}")
+    # Reject NaN/inf up front. A NaN compares False to everything, so it would
+    # silently corrupt rank-based AUC/ROC ordering and slip past the [0,1]
+    # range guards in ECE/Brier — fail closed for every metric instead.
+    for score in scores:
+        if not math.isfinite(score):
+            raise ValueError(f"scores must be finite, got {score!r}")
 
 
 def roc_auc(scores: Sequence[Number], labels: Sequence[int]) -> float | None:

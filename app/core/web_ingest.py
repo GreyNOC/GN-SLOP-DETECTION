@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
 import re
 import socket
+import ssl
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Final
-from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse, urlunparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from app.core.netguard import ip_is_blocked
 from app.core.settings import get_settings
 
 TEXT_CONTENT_TYPES: Final = {
@@ -23,6 +24,14 @@ MAX_REDIRECTS: Final = 5
 ALLOWED_PORTS: Final = {80, 443}
 ALLOWED_CONTENT_ENCODINGS: Final = {"", "identity"}
 CONTROL_OR_SPACE_RE: Final = re.compile(r"[\x00-\x20\x7f]")
+_REDIRECT_STATUSES: Final = frozenset({301, 302, 303, 307, 308})
+_REQUEST_HEADERS: Final = {
+    "Accept": "text/html,text/plain,application/xhtml+xml;q=0.9,*/*;q=0.5",
+    # Refuse compressed responses so a tiny gzipped payload cannot expand
+    # past the configured byte cap during decoding.
+    "Accept-Encoding": "identity",
+    "User-Agent": "GreyNOC-Slop-Detection/0.1",
+}
 
 
 class WebsiteFetchError(ValueError):
@@ -45,25 +54,6 @@ class FetchedWebsite:
     meta_description: str | None = None
     open_graph_title: str | None = None
     open_graph_description: str | None = None
-
-
-class SafeRedirectHandler(HTTPRedirectHandler):
-    def __init__(self, allow_private_urls: bool) -> None:
-        self.allow_private_urls = allow_private_urls
-        self.redirect_count = 0
-        self.redirect_chain: list[str] = []
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, N802
-        self.redirect_count += 1
-        if self.redirect_count > MAX_REDIRECTS:
-            raise WebsiteFetchError("Website redirected too many times.")
-
-        safe_url = urljoin(req.full_url, newurl)
-        # Re-run full validation on every redirect target so DNS rebinding or
-        # cross-protocol bounces are rejected at the same gate as the original URL.
-        safe_url = _enforce_url_policy(safe_url, self.allow_private_urls)
-        self.redirect_chain.append(safe_url)
-        return super().redirect_request(req, fp, code, msg, headers, safe_url)
 
 
 class ReadableHTMLParser(HTMLParser):
@@ -148,75 +138,169 @@ def normalize_website_url(url: str) -> str:
     return cleaned
 
 
+def _resolve_pinned_ip(hostname: str, allow_private_urls: bool) -> str:
+    """Resolve ``hostname`` once and return one validated IP to connect to.
+
+    Connecting to the returned IP (rather than re-resolving the hostname at
+    socket time) is what closes the DNS-rebinding / TOCTOU window: the address
+    we vet here is the exact address we connect to. Rejects the whole host if
+    ANY resolved address is non-public, because a rebind can return one good
+    and one bad record.
+    """
+    try:
+        ipaddress.ip_address(hostname)
+        addresses = [hostname]
+    except ValueError:
+        try:
+            results = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+        except socket.gaierror as error:
+            raise WebsiteFetchError(f"Could not resolve host: {hostname}") from error
+        addresses = [str(result[4][0]) for result in results]
+    if not addresses:
+        raise WebsiteFetchError(f"Could not resolve host: {hostname}")
+    if not allow_private_urls:
+        for address in addresses:
+            if ip_is_blocked(ipaddress.ip_address(address)):
+                raise WebsiteFetchError(
+                    "Private, local, and reserved network URLs are not enabled."
+                )
+    return addresses[0]
+
+
+def _read_pinned(
+    current_url: str, timeout: float, max_bytes: int
+) -> tuple[int, http.client.HTTPResponse, bytes | None]:
+    """Open a connection to the pinned IP for ``current_url`` and return the response.
+
+    Returns ``(status, response, body_or_None)``. ``body`` is read (capped) only
+    for a final (non-redirect) 2xx/3xx-less response; for redirects the body is
+    drained and ``None`` is returned so the caller can follow the Location. The
+    socket is pinned to a validated IP so a DNS rebind between validation and
+    connect cannot redirect egress to a private/metadata address.
+    """
+    parsed = urlparse(current_url)
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    pinned_ip = _resolve_pinned_ip(_ascii_hostname(host), allow_private_urls=get_settings().allow_private_urls)
+
+    conn: http.client.HTTPConnection | None = None
+    raw_sock: socket.socket | None = None
+    try:
+        raw_sock = socket.create_connection((pinned_ip, port), timeout=timeout)
+        if parsed.scheme == "https":
+            # Pin the socket to the validated IP, but keep cert validation / SNI
+            # bound to the hostname.
+            sock = ssl.create_default_context().wrap_socket(raw_sock, server_hostname=host)
+            conn = http.client.HTTPSConnection(host, port, timeout=timeout)
+        else:
+            sock = raw_sock
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.sock = sock  # bypass conn.connect(), which would re-resolve the name
+        raw_sock = None  # ownership transferred to conn
+        headers = dict(_REQUEST_HEADERS)
+        headers["Host"] = host
+        conn.request("GET", path, headers=headers)
+        response = conn.getresponse()
+        status = response.status
+        if status in _REDIRECT_STATUSES:
+            response.read()  # drain so the connection can be closed cleanly
+            return status, response, None
+        if status >= 400:
+            response.read()
+            raise WebsiteFetchError(f"Website returned HTTP {status}.")
+        body = response.read(max_bytes + 1)
+        return status, response, body
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        elif raw_sock is not None:
+            try:
+                raw_sock.close()
+            except Exception:
+                pass
+
+
 def fetch_website_text(url: str) -> FetchedWebsite:
     settings = get_settings()
     normalized_url = normalize_website_url(url)
-    sanitized_url = _enforce_url_policy(normalized_url, settings.allow_private_urls)
+    allow_private = settings.allow_private_urls
+    current_url = _enforce_url_policy(normalized_url, allow_private)
 
-    request = Request(
-        sanitized_url,
-        headers={
-            "Accept": "text/html,text/plain,application/xhtml+xml;q=0.9,*/*;q=0.5",
-            # Refuse compressed responses so a tiny gzipped payload cannot expand
-            # past the configured byte cap during decoding.
-            "Accept-Encoding": "identity",
-            "User-Agent": "GreyNOC-Slop-Detection/0.1",
-        },
-        method="GET",
-    )
-    redirect_handler = SafeRedirectHandler(settings.allow_private_urls)
-    opener = build_opener(redirect_handler)
+    redirect_chain: list[str] = []
+    seen_urls: set[str] = {current_url}
+    redirect_count = 0
+    raw = b""
+    final_url = current_url
+    status_code = 0
+    response_headers: http.client.HTTPMessage | None = None
 
-    try:
-        with opener.open(request, timeout=settings.web_fetch_timeout_seconds) as response:
-            final_url = response.geturl()
-            # Validate the post-redirect URL one last time before consuming the
-            # response body — defence in depth against any redirect we missed.
-            _enforce_url_policy(final_url, settings.allow_private_urls)
+    while True:
+        try:
+            status, response, body = _read_pinned(
+                current_url, settings.web_fetch_timeout_seconds, settings.web_fetch_max_bytes
+            )
+        except WebsiteFetchError:
+            raise
+        except (OSError, http.client.HTTPException) as error:
+            raise WebsiteFetchError(f"Could not fetch website: {error}") from error
 
-            content_type = response.headers.get_content_type()
-            if content_type not in TEXT_CONTENT_TYPES:
-                raise WebsiteFetchError(f"Unsupported content type: {content_type}")
+        if status in _REDIRECT_STATUSES:
+            location = response.headers.get("Location")
+            if not location:
+                raise WebsiteFetchError("Website sent a redirect without a destination.")
+            redirect_count += 1
+            if redirect_count > MAX_REDIRECTS:
+                raise WebsiteFetchError("Website redirected too many times.")
+            # Re-run full validation on every redirect target so DNS rebinding
+            # or cross-protocol bounces are rejected at the same gate — and the
+            # next hop is pinned to its own freshly validated IP.
+            next_url = _enforce_url_policy(urljoin(current_url, location), allow_private)
+            if next_url in seen_urls:
+                raise WebsiteFetchError("Website redirected in a loop.")
+            seen_urls.add(next_url)
+            redirect_chain.append(next_url)
+            current_url = next_url
+            continue
 
-            content_encoding = (response.headers.get("Content-Encoding") or "").strip().lower()
-            if content_encoding and content_encoding not in ALLOWED_CONTENT_ENCODINGS:
-                raise WebsiteFetchError(
-                    f"Unsupported content encoding: {content_encoding}"
-                )
+        response_headers = response.headers
+        content_type = response_headers.get_content_type()
+        if content_type not in TEXT_CONTENT_TYPES:
+            raise WebsiteFetchError(f"Unsupported content type: {content_type}")
 
-            announced_length = response.headers.get("Content-Length")
-            if announced_length is not None:
-                try:
-                    announced = int(announced_length)
-                except ValueError as error:
-                    raise WebsiteFetchError("Server returned an invalid Content-Length.") from error
-                if announced > settings.web_fetch_max_bytes:
-                    raise WebsiteFetchError(
-                        "Website response exceeded the configured analysis limit."
-                    )
+        content_encoding = (response_headers.get("Content-Encoding") or "").strip().lower()
+        if content_encoding and content_encoding not in ALLOWED_CONTENT_ENCODINGS:
+            raise WebsiteFetchError(f"Unsupported content encoding: {content_encoding}")
 
-            charset = response.headers.get_content_charset() or "utf-8"
-            raw = response.read(settings.web_fetch_max_bytes + 1)
-            if len(raw) > settings.web_fetch_max_bytes:
+        announced_length = response_headers.get("Content-Length")
+        if announced_length is not None:
+            try:
+                announced = int(announced_length)
+            except ValueError as error:
+                raise WebsiteFetchError("Server returned an invalid Content-Length.") from error
+            if announced > settings.web_fetch_max_bytes:
                 raise WebsiteFetchError("Website response exceeded the configured analysis limit.")
 
-            try:
-                body = raw.decode(charset, errors="replace")
-            except LookupError as error:
-                # Unknown charset names land here; fall back to utf-8 to keep
-                # the analysis useful instead of aborting the whole request.
-                body = raw.decode("utf-8", errors="replace")
-                del error
-            status_code = response.status
-    except WebsiteFetchError:
-        raise
-    except HTTPError as error:
-        raise WebsiteFetchError(f"Website returned HTTP {error.code}.") from error
-    except URLError as error:
-        reason = getattr(error, "reason", error)
-        raise WebsiteFetchError(f"Could not fetch website: {reason}") from error
-    except TimeoutError as error:
-        raise WebsiteFetchError("Website fetch timed out.") from error
+        raw = body or b""
+        if len(raw) > settings.web_fetch_max_bytes:
+            raise WebsiteFetchError("Website response exceeded the configured analysis limit.")
+        final_url = current_url
+        status_code = status
+        break
+
+    charset = response_headers.get_content_charset() or "utf-8"
+    try:
+        body_text = raw.decode(charset, errors="replace")
+    except LookupError:
+        # Unknown charset names land here; fall back to utf-8 to keep the
+        # analysis useful instead of aborting the whole request.
+        body_text = raw.decode("utf-8", errors="replace")
+    body = body_text
 
     meta_description: str | None = None
     open_graph_title: str | None = None
@@ -256,8 +340,8 @@ def fetch_website_text(url: str) -> FetchedWebsite:
         status_code=status_code,
         content_type=content_type,
         byte_count=len(raw),
-        redirect_count=redirect_handler.redirect_count,
-        redirect_chain=tuple(redirect_handler.redirect_chain),
+        redirect_count=redirect_count,
+        redirect_chain=tuple(redirect_chain),
         extraction_text_length=len(text),
         content_hash=hashlib.sha256(raw).hexdigest(),
         meta_description=meta_description,
@@ -335,14 +419,10 @@ def _host_is_private(hostname: str) -> bool:
 
 
 def _address_is_private(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-        or address.is_unspecified
-    )
+    # Delegate to the shared SSRF classifier so the website fetcher and the LLM
+    # seam stay in lock-step, including transitional IPv6 (6to4 / mapped / Teredo)
+    # encodings that smuggle a private IPv4 inside a routable-looking address.
+    return ip_is_blocked(address)
 
 
 def _clean_text(text: str) -> str:

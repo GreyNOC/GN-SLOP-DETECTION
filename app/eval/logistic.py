@@ -77,6 +77,15 @@ def fit_logistic(
     zero, which is what keeps a tiny corpus from producing wild coefficients).
     The intercept is never regularized. Returns a model whose coefficients are
     expressed in the original (un-standardized) feature space.
+
+    Note on the objective: both the data loss and the penalty are averaged over
+    ``n`` (the gradient adds ``l2 * w_j / n``), so the effective penalty is
+    ``l2/n`` — by design. Because the data term is a *mean* loss (O(1) in ``n``),
+    this keeps the penalty's pull strongest exactly where it is needed, on tiny
+    corpora, and lets it relax as more data accumulates. The trade-off is that a
+    given ``l2`` is corpus-size relative, not absolute: re-tune it if you change
+    ``n`` by an order of magnitude. The ``calibrate`` recovery path sidesteps
+    this entirely by defaulting ``l2=0``.
     """
     n = len(labels)
     if n == 0:

@@ -172,6 +172,17 @@ def walk_collect(
                 relative = absolute.relative_to(root).as_posix()
             except ValueError:
                 continue
+            # Never follow a symlink out of the scan root: a symlinked file
+            # could point at /etc/passwd or an out-of-tree secret and get
+            # scanned (and its content echoed into findings). Resolve and
+            # require containment under root.
+            try:
+                if absolute.is_symlink() or not absolute.resolve().is_relative_to(root):
+                    _record_skip(relative, "symlink escapes scan root")
+                    continue
+            except (OSError, RuntimeError):
+                _record_skip(relative, "unresolvable path")
+                continue
             suffix = absolute.suffix.lower()
             if suffix in _SKIP_EXTENSIONS:
                 _record_skip(relative, "binary extension")

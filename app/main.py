@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import time
@@ -226,30 +227,95 @@ async def enforce_same_origin(request: Request, call_next):
     )
 
 
-@app.middleware("http")
-async def enforce_body_cap(request: Request, call_next):
+async def _send_413(send, max_bytes: int) -> None:
+    body = json.dumps(
+        {"detail": f"Request body exceeds the {max_bytes}-byte cap."}
+    ).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+class BodyCapMiddleware:
     """Refuse oversized requests before they reach a route handler.
 
-    The per-endpoint caps (media_max_bytes, archive size budget, etc.)
-    still apply, but they only fire after a route has read the body.
-    Without this middleware an attacker can POST a multi-GB body to
-    any endpoint and force Starlette to buffer it before the route
-    decides to reject it.
+    Implemented as a raw ASGI middleware (not BaseHTTPMiddleware) so the
+    byte-counting wrapper is the receive callable the route actually reads
+    from. Content-Length is a fast reject; a chunked (Transfer-Encoding:
+    chunked) body carries no Content-Length, so the running total is counted
+    as the body streams in and the request is aborted once it exceeds the cap.
+    Without this, an attacker could POST a multi-GB chunked body to any
+    endpoint and force Starlette to buffer it before a route rejects it.
     """
-    max_bytes = settings.max_request_body_bytes
-    if max_bytes > 0:
-        length_header = request.headers.get("content-length")
-        if length_header is not None:
-            try:
-                announced = int(length_header)
-            except ValueError:
-                announced = -1
-            if announced > max_bytes:
-                return JSONResponse(
-                    status_code=413,
-                    content={"detail": f"Request body exceeds the {max_bytes}-byte cap."},
-                )
-    return await call_next(request)
+
+    def __init__(self, app) -> None:  # noqa: ANN001
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        max_bytes = settings.max_request_body_bytes
+        if max_bytes <= 0:
+            await self.app(scope, receive, send)
+            return
+
+        has_content_length = False
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                has_content_length = True
+                try:
+                    if int(value) > max_bytes:
+                        await _send_413(send, max_bytes)
+                        return
+                except ValueError:
+                    pass
+                break
+
+        # A Content-Length within the cap bounds the body, so stream it straight
+        # through. Only a chunked body (no Content-Length) is unbounded by the
+        # header, so buffer it under the cap and replay it to the app. Buffering
+        # is itself bounded by max_bytes, and legitimate clients (browsers, curl,
+        # httpx file uploads) send Content-Length, so this rare path is cheap.
+        if has_content_length:
+            await self.app(scope, receive, send)
+            return
+
+        chunks: list[bytes] = []
+        received = 0
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+            received += len(message.get("body", b""))
+            if received > max_bytes:
+                await _send_413(send, max_bytes)
+                return
+            chunks.append(message.get("body", b""))
+            more_body = message.get("more_body", False)
+
+        full_body = b"".join(chunks)
+        replayed = False
+
+        async def replay_receive():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": full_body, "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
 
 
 @app.middleware("http")
@@ -282,6 +348,12 @@ async def add_security_headers(request: Request, call_next) -> Response:
     return response
 
 
+# Registered LAST so it is the OUTERMOST middleware: it must wrap the raw ASGI
+# receive directly (a BaseHTTPMiddleware sitting outside it would buffer the
+# body first and defeat the streamed byte count).
+app.add_middleware(BodyCapMiddleware)
+
+
 @app.exception_handler(Exception)
 async def _log_and_500(request: Request, exc: Exception) -> JSONResponse:
     """Catch-all so uncaught exceptions leave a traceback in the backend log
@@ -292,7 +364,7 @@ async def _log_and_500(request: Request, exc: Exception) -> JSONResponse:
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     detail = (
         f"{type(exc).__name__}: {exc}"
-        if settings.environment != "production"
+        if settings.expose_error_detail
         else "Internal server error. Check the backend log for the traceback."
     )
     return JSONResponse(status_code=500, content={"detail": detail})

@@ -115,12 +115,18 @@ CONTRASTIVE_NEGATION_RE = re.compile(
     r"\b(?:it'?s|that'?s|this is|we'?re|they'?re|you'?re)?\s*not\s+"
     r"(?:just|only|merely|simply)\b[^.!?]{1,80}?"
     r"(?:,\s*(?:it'?s|it\s+is|that'?s|that\s+is|but rather|but)\b"
+    # Spaced dash only here: this alternative has no right-hand anchor, so a
+    # tight ASCII hyphen would match inside compounds like "well-being". The
+    # tight-hyphen contrast is covered by CONTRASTIVE_NEGATION_DASH_RE, which
+    # anchors on it's/but/rather after the dash.
     r"|\s-\s|;\s*(?:it'?s|it\s+is)\b)",
     re.IGNORECASE,
 )
-# Bare "not X - it's Y" / "not X, but Y" without a leading pronoun.
+# Bare "not X - it's Y" / "not X, but Y" without a leading pronoun. The dash
+# pivot accepts a tight ASCII hyphen ("fast-it's reliable") too, not only the
+# spaced form — both boundaries keep it pinned to the contrastive construction.
 CONTRASTIVE_NEGATION_DASH_RE = re.compile(
-    r"\bnot\s+[^.!?,]{2,40}\s-\s(?:it'?s|but|rather)\b",
+    r"\bnot\s+[^.!?,]{2,40}\s*-\s*(?:it'?s|but|rather)\b",
     re.IGNORECASE,
 )
 # Rule-of-three escalation: three comma-separated items with a trailing
@@ -544,7 +550,9 @@ class SlopDetector:
         burstiness = self._burstiness(sentence_lengths)
         if (
             word_count >= self.MIN_WORDS_FOR_BURSTINESS
-            and 0 < burstiness < self.BURSTINESS_FLAG_THRESHOLD
+            # 0.0 is the strongest tell (perfectly uniform sentence lengths);
+            # only -1.0 is the "not enough data" sentinel, so admit 0.0.
+            and 0 <= burstiness < self.BURSTINESS_FLAG_THRESHOLD
         ):
             signals.append(
                 DetectionSignal(
@@ -797,7 +805,10 @@ class SlopDetector:
                     matches.append(SignalMatch(term=kind, excerpt=excerpt[:120]))
                 if len(matches) >= 64:
                     break
-        return concrete / len(words), tuple(matches)
+        # Pattern matches can overlap the digit/CamelCase token counts, so
+        # `concrete` can exceed the token count; clamp to keep the ratio a true
+        # [0,1] fraction (ContentProfile.specificity_ratio is read as one).
+        return min(concrete / len(words), 1.0), tuple(matches)
 
     def _unsupported_claim_sentences(self, sentences: list[str]) -> int:
         """Count sentences that look like claims but lack nearby evidence.
@@ -816,18 +827,24 @@ class SlopDetector:
         )
         evidence_re = re.compile(
             r"\b\d|https?://|CVE-\d{4}-\d|doi:|\[\d+\]|\([A-Z][a-z]+,\s*\d{4}\)|"
-            r"\b[A-Z][a-zA-Z]+\s[A-Z][a-zA-Z]+\b",
+            # A named organisation counts only with a real legal/institution
+            # suffix — a bare "[A-Z]\w+ [A-Z]\w+" pair matched any Title Case
+            # ("Our Team", "The System") and let trivial capitalization pass as
+            # evidence, defeating the whole signal.
+            r"\b[A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)*\s"
+            r"(?:Inc|LLC|Ltd|Corp|Co|GmbH|University|Institute|Foundation|"
+            r"Labs?|Agency|Department|Commission|Association|Consortium)\b",
         )
         bare = 0
         for index, sentence in enumerate(sentences):
             if not claim_re.search(sentence):
                 continue
-            # Look at this sentence + neighbour for any evidence anchor.
+            # Look at this sentence + the FORWARD neighbour only. Including the
+            # previous sentence too let a single anchor blanket-suppress several
+            # adjacent claim sentences.
             window = sentence
             if index + 1 < len(sentences):
                 window += " " + sentences[index + 1]
-            if index - 1 >= 0:
-                window = sentences[index - 1] + " " + window
             if not evidence_re.search(window):
                 bare += 1
         return bare
@@ -838,24 +855,6 @@ class SlopDetector:
         if word_count < 150:
             return "medium", 0.75
         return "high", 1.0
-
-    def _specificity_ratio(self, cased_tokens: list[str], words: list[str]) -> float:
-        if not words:
-            return 0.0
-        concrete = 0
-        for token_cased, token_lower in zip(cased_tokens, words, strict=True):
-            if any(ch.isdigit() for ch in token_lower):
-                concrete += 1
-                continue
-            # Proper noun / acronym heuristic: capitalized with at least one
-            # other uppercase letter (e.g., "SSH", "GreyNOC", "DDoS").
-            if (
-                len(token_cased) >= 2
-                and token_cased[0].isupper()
-                and any(ch.isupper() for ch in token_cased[1:])
-            ):
-                concrete += 1
-        return concrete / len(words)
 
     def _claim_density(self, words: list[str]) -> float:
         if not words:

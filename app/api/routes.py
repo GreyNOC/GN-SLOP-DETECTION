@@ -16,6 +16,7 @@ from app.core.code_scanner import (
 )
 from app.core.code_scanner.llm import LlmConfig, judge_text, scan_whole_file, verify_finding
 from app.core.code_scanner.model import Finding, Severity
+from app.core.code_scanner.redaction import redact_text
 from app.core.code_scanner.sarif import to_sarif
 from app.core.code_scanner.scanner import ScanTargetForbidden
 from app.core.code_scanner.sources import LocalPathSource
@@ -29,6 +30,7 @@ from app.core.web_ingest import WebsiteFetchError, fetch_website_text
 from app.models.schemas import (
     MAX_MEDIA_FILENAME_LENGTH,
     MAX_SOURCE_LENGTH,
+    MAX_TEXT_LENGTH,
     AnalyzeRequest,
     AnalyzeResponse,
     AnalyzeUrlRequest,
@@ -101,7 +103,11 @@ def _model_detection_response(result) -> ModelDetectionResponse | None:
     if detection is None:
         return None
     extra = getattr(detection, "extra", None) or {}
+    # Surface whichever raw number is load-bearing for the active backend:
+    # single-model perplexity, or the Binoculars cross-perplexity score.
     raw_perplexity = extra.get("perplexity")
+    if raw_perplexity is None:
+        raw_perplexity = extra.get("binoculars_score")
     return ModelDetectionResponse(
         available=detection.available,
         method=detection.method,
@@ -172,7 +178,10 @@ def analyze_url(request: AnalyzeUrlRequest) -> AnalyzeResponse:
     )
     return to_response(
         AnalyzeRequest(
-            text=fetched.text,
+            # A large-but-valid page can exceed the request schema's text cap;
+            # clamp it so analysis proceeds on the first MAX_TEXT_LENGTH chars
+            # instead of raising a ValidationError that surfaces as a 500.
+            text=fetched.text[:MAX_TEXT_LENGTH],
             source=request.source or fetched.title or fetched.final_url,
             profile=getattr(request, "profile", "general"),
         ),
@@ -443,7 +452,14 @@ def _apply_llm(result: ScanResult, llm_payload, request: ScanRequest) -> None:
                 target_line = max(1, int(entry.get("line", 1)))
                 window_start = max(0, target_line - 2)
                 window_end = min(len(file_lines), target_line + 1)
-                snippet = " | ".join(file_lines[window_start:window_end])[:240]
+                # This snippet is built locally from raw file content, so it
+                # bypasses the scanner's redaction pass — redact it here or a
+                # hardcoded credential on a flagged line leaks into the report.
+                raw_snippet = " | ".join(file_lines[window_start:window_end])[:240]
+                snippet, snippet_redacted = redact_text(raw_snippet)
+                key = f"llm.scan@{walked.relative_path}:{target_line}"
+                if snippet_redacted:
+                    result.redacted_findings.add(key)
                 result.findings.append(
                     Finding(
                         rule_id="llm.scan",
@@ -495,12 +511,29 @@ async def scan_code_upload(
             detail="Upload must be a .zip / .tar / .tar.gz / .tgz / .tar.bz2 / .tar.xz archive.",
         )
 
+    # Stream the upload into the tempfile under a hard cap and abort once it is
+    # exceeded, so a chunked (no Content-Length) body cannot write an unbounded
+    # archive to disk past the global body-cap middleware.
+    cap = get_settings().max_request_body_bytes or (256 * 1024 * 1024)
+    written = 0
     with tempfile.NamedTemporaryFile(delete=False, suffix=Path(suffix).suffix) as tmp:
-        data = await file.read()
-        if not data:
-            raise HTTPException(status_code=422, detail="Uploaded archive is empty.")
-        tmp.write(data)
         tmp_path = tmp.name
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > cap:
+                tmp.close()
+                Path(tmp_path).unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Uploaded archive exceeds the {cap}-byte cap.",
+                )
+            tmp.write(chunk)
+    if written == 0:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail="Uploaded archive is empty.")
 
     scan_request = ScanRequest(
         target=tmp_path,

@@ -99,7 +99,11 @@ _RULES_RAW = [
         "Inspect the destination. Long base32/64 labels under an unfamiliar parent domain are rarely benign in production code.",
         (),
         (),
-        r"\b[A-Za-z0-9]{32,}\.(?:[a-z0-9\-]{2,}\.){0,3}[a-z]{2,}\b",
+        # Exclude a pure-hex label before the dot: git commit SHAs and integrity
+        # hashes (32/40/64 hex chars) were the dominant false positive. Genuine
+        # DNS-tunnel labels are base32/64 and carry non-hex letters, so they
+        # still match.
+        r"\b(?![0-9a-fA-F]+\.)[A-Za-z0-9]{32,}\.(?:[a-z0-9\-]{2,}\.){0,3}[a-z]{2,}\b",
     ),
     (
         "any.pastebin-callback",

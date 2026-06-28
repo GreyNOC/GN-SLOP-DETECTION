@@ -20,6 +20,17 @@ from app.core.code_scanner.sources.base import ScanSource
 # an archive could expand to many GB even with small per-file files.
 _MAX_EXTRACTED_BYTES = 512 * 1024 * 1024
 
+# Hard cap on entry count. A zip/tar can stay tiny on disk yet declare
+# millions of entries (inode / file-handle exhaustion DoS) without ever
+# tripping the byte budget, so bound the count independently.
+_MAX_ENTRIES = 50_000
+
+# zip external_attr high 16 bits carry the unix st_mode. A symlink is
+# S_IFLNK (0o120000); a regular file is S_IFREG (0o100000) or 0 (no mode
+# recorded). Anything else (device, fifo, socket) we also refuse.
+_S_IFMT = 0o170000
+_S_IFREG = 0o100000
+
 
 class ArchiveSource(ScanSource):
     def __init__(self, target: str) -> None:
@@ -69,9 +80,19 @@ class ArchiveSource(ScanSource):
     def _extract_zip(self, archive: Path, dest: Path) -> None:
         with zipfile.ZipFile(archive) as zf:
             total = 0
+            entries = 0
             for info in zf.infolist():
                 if info.is_dir():
                     continue
+                # Drop symlink / special members instead of relying on the
+                # incidental fact that _stream_to never calls os.symlink —
+                # mirrors the explicit isfile() gate on the tar path.
+                mode = (info.external_attr >> 16) & _S_IFMT
+                if mode not in (0, _S_IFREG):
+                    continue
+                entries += 1
+                if entries > _MAX_ENTRIES:
+                    raise ValueError("Archive has too many entries.")
                 if info.file_size > _MAX_EXTRACTED_BYTES:
                     raise ValueError("Archive entry too large.")
                 remaining = _MAX_EXTRACTED_BYTES - total
@@ -85,6 +106,7 @@ class ArchiveSource(ScanSource):
     def _extract_tar(self, archive: Path, dest: Path) -> None:
         with tarfile.open(archive, "r:*") as tf:
             total = 0
+            entries = 0
             for member in tf.getmembers():
                 # Drop symlinks, hardlinks, devices, fifos — never extract
                 # anything that could escape the tempdir or affect the
@@ -93,6 +115,9 @@ class ArchiveSource(ScanSource):
                 # don't honor archive-supplied directory metadata.
                 if not member.isfile():
                     continue
+                entries += 1
+                if entries > _MAX_ENTRIES:
+                    raise ValueError("Archive has too many entries.")
                 if member.size > _MAX_EXTRACTED_BYTES:
                     raise ValueError("Archive entry too large.")
                 remaining = _MAX_EXTRACTED_BYTES - total

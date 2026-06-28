@@ -157,7 +157,8 @@ def judge_media_image(config: LlmConfig, data: bytes, fmt: MediaFormat) -> Media
     )
     parsed = _llm._extract_first_json(response)
     if not isinstance(parsed, dict):
-        return _skip(config, "error", str(response))
+        safe_response, _ = redact_text(str(response))
+        return _skip(config, "error", safe_response)
 
     verdict = str(parsed.get("verdict", "")).lower()
     if verdict not in {"likely_ai_generated", "likely_authentic", "uncertain"}:

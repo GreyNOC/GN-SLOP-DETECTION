@@ -60,7 +60,7 @@ RULES = (
         category="backdoor",
         remediation="Configuration should not be executable. Replace with a flag that picks among hardcoded handlers.",
         pattern=(
-            r"(?:os\.environ\.get|os\.getenv|process\.env\.\w+)\s*\([\s\S]{0,200}?(?:eval|exec|"
+            r"(?:os\.environ\.get|os\.getenv|process\.env\.\w+)\s*\([\s\S]{0,120}?(?:eval|exec|"
             r"os\.system|subprocess\.\w+\s*\([^)]*shell\s*=\s*True)"
         ),
         flags=re.MULTILINE,
@@ -77,7 +77,7 @@ RULES = (
         category="backdoor",
         remediation="Decode the blob, treat it as a sandboxed inspection target, and reject any path that re-executes it.",
         pattern=(
-            r"(?:base64\.b64decode|atob|Buffer\.from\s*\([^)]*[\"']base64[\"'])\s*\([\s\S]{0,2000}?"
+            r"(?:base64\.b64decode|atob|Buffer\.from\s*\([^)]*[\"']base64[\"'])\s*\([\s\S]{0,400}?"
             r"(?:eval|exec|Function|vm\s*\.\s*run\w+)"
         ),
         flags=re.MULTILINE,

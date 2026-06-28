@@ -93,6 +93,21 @@ def _parse_row(row: dict, line_no: int) -> CorpusExample:
     )
 
 
+def _parse_line(line_no: int, stripped: str) -> CorpusExample:
+    """Parse one non-blank JSONL line into a CorpusExample or raise CorpusError.
+
+    Single home for the JSON-decode / non-dict / row-validation wording so the
+    strict and lenient readers can never drift apart.
+    """
+    try:
+        row = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise CorpusError(f"line {line_no}: invalid JSON ({exc.msg})") from exc
+    if not isinstance(row, dict):
+        raise CorpusError(f"line {line_no}: each row must be a JSON object")
+    return _parse_row(row, line_no)
+
+
 def iter_corpus(path: str | Path, *, lenient: bool = False) -> Iterator[CorpusExample]:
     """Yield ``CorpusExample`` rows from a JSONL file.
 
@@ -106,21 +121,12 @@ def iter_corpus(path: str | Path, *, lenient: bool = False) -> Iterator[CorpusEx
             if not stripped:
                 continue
             try:
-                row = json.loads(stripped)
-            except json.JSONDecodeError as exc:
-                if lenient:
-                    continue
-                raise CorpusError(f"line {line_no}: invalid JSON ({exc.msg})") from exc
-            if not isinstance(row, dict):
-                if lenient:
-                    continue
-                raise CorpusError(f"line {line_no}: each row must be a JSON object")
-            try:
-                yield _parse_row(row, line_no)
+                example = _parse_line(line_no, stripped)
             except CorpusError:
                 if lenient:
                     continue
                 raise
+            yield example
 
 
 def load_corpus(
@@ -141,17 +147,12 @@ def load_corpus(
             if not stripped:
                 continue
             try:
-                row = json.loads(stripped)
-                if not isinstance(row, dict):
-                    raise CorpusError(f"line {line_no}: each row must be a JSON object")
-                example = _parse_row(row, line_no)
-            except (CorpusError, json.JSONDecodeError) as exc:
+                example = _parse_line(line_no, stripped)
+            except CorpusError as exc:
                 if lenient:
                     skipped += 1
                     warnings.append(str(exc))
                     continue
-                if isinstance(exc, json.JSONDecodeError):
-                    raise CorpusError(f"line {line_no}: invalid JSON ({exc.msg})") from exc
                 raise
             examples.append(example)
             seen_text[example.text.strip()] += 1

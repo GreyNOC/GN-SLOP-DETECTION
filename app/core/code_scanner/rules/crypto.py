@@ -97,7 +97,12 @@ RULES = (
         confidence=Confidence.MEDIUM,
         category="crypto",
         remediation="Generate a fresh random IV / salt per message; store it alongside the ciphertext.",
-        pattern=r"(?:iv|salt|nonce)\s*=\s*[\"'][A-Za-z0-9+/=]{6,}[\"']",
+        # Left boundary (start-of-line or a non-identifier char) so the keyword
+        # is a real assignment target — not a suffix inside a larger identifier
+        # like `motiv = "..."` or `default_salt = "..."`. Matches the convention
+        # used by the other rules in this file (\b is too weak: it treats `_` as
+        # a word char, so `default_salt` would still slip through).
+        pattern=r"(?:^|[^A-Za-z0-9_])(?:iv|salt|nonce)\s*=\s*[\"'][A-Za-z0-9+/=]{6,}[\"']",
         flags=re.IGNORECASE | re.MULTILINE,
     ),
     RegexRule(

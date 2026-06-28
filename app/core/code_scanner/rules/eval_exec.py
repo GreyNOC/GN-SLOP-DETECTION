@@ -25,7 +25,10 @@ _RULES_RAW = [
         "Replace with a typed parser (json.loads, ast.literal_eval) or a constrained DSL.",
         ("python",),
         (),
-        r"\b(?:eval|exec)\s*\(",
+        # Negative lookbehind for word-char or dot so member access like
+        # df.eval(...) / obj.exec(...) / parser.eval(...) is not flagged as the
+        # builtin, mirroring the js.eval rule. Bare eval(/exec( still match.
+        r"(?<![\w.])(?:eval|exec)\s*\(",
     ),
     (
         "py.pickle-loads",
@@ -49,7 +52,11 @@ _RULES_RAW = [
         "Use yaml.safe_load or pass Loader=yaml.SafeLoader explicitly.",
         ("python",),
         (),
-        r"\byaml\s*\.\s*load\s*\([^)]*(?<!SafeLoader)\s*\)",
+        # Flag yaml.load(...) unless a SafeLoader / safe_load appears ANYWHERE in
+        # the argument list. The old fixed-position lookbehind only exempted a
+        # SafeLoader that was the very last token before ')', so
+        # yaml.load(f, Loader=SafeLoader, x=1) was a false positive.
+        r"\byaml\s*\.\s*load\s*\((?![^)]*(?:SafeLoader|safe_load))[^)]*\)",
     ),
     (
         "py.marshal-loads",

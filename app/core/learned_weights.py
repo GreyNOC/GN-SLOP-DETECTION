@@ -86,6 +86,16 @@ class LearnedWeights:
             weights = {str(name): float(value) for name, value in raw_weights.items()}
         except (KeyError, TypeError, ValueError):
             return None
+        # A degenerate model (no coefficients, or all-zero) ignores every signal
+        # and emits the constant sigmoid(bias) for all inputs — it cannot honestly
+        # claim "+learned". Reject it so the engine falls back to the hand-tuned
+        # additive scorer instead of advertising a learned tag for a no-op model.
+        if not weights or all(value == 0.0 for value in weights.values()):
+            return None
+        # Reject non-finite bias/weights from a corrupted file rather than letting
+        # NaN/inf propagate into a meaningless score.
+        if not math.isfinite(bias) or any(not math.isfinite(v) for v in weights.values()):
+            return None
         trained_on = int(data.get("trained_on", 0) or 0)
         return cls(bias=bias, weights=weights, trained_on=trained_on, source=source)
 

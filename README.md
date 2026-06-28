@@ -121,6 +121,10 @@ Scores range from `0.0` to `1.0`.
 - `0.30 - 0.59`: moderate slop risk
 - `0.60 - 1.00`: high slop risk
 
+The text and media engines use these bands. The code scanner uses a slightly
+higher `high` cutoff of `0.65` (so its high band lines up with the "any critical
+finding" floor); its `moderate` band still starts at `0.30`.
+
 This app does not claim to prove whether content is AI-generated. It highlights quality and trust signals for human review.
 
 Responses include a complete slop picture:

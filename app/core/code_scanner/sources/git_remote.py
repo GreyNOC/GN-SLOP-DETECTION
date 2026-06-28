@@ -1,10 +1,13 @@
 """Remote git source — shallow-clone a public URL into a tempdir, scan, clean up.
 
 Only http(s) URLs are accepted, and a strict allowlist of hosts is
-enforced. Cloning is shallow (depth=1) and bandwidth-capped to the
-configured max-total-bytes setting. Authentication is intentionally
-not supported in v1 — pass a local clone via ``git_local`` if you need
-private-repo scanning.
+enforced. Cloning is shallow (depth=1, single-branch, no tags) and bounded
+by a 120-second subprocess timeout plus a partial-clone blob filter
+(``--filter=blob:limit``) that refuses to fetch any single blob larger than
+``_MAX_BLOB_BYTES``. The scan-time ``max_total_bytes`` setting is applied
+later, during the file walk, and does not itself cap the on-disk clone.
+Authentication is intentionally not supported in v1 — pass a local clone via
+``git_local`` if you need private-repo scanning.
 """
 
 from __future__ import annotations
@@ -29,6 +32,11 @@ _HOST_ALLOWLIST = frozenset(
     }
 )
 _URL_RE = re.compile(r"^https?://[^\s]+$")
+
+# Per-blob fetch cap. A partial clone refuses to download any single object
+# larger than this, so a malicious repo cannot stream gigabytes of one giant
+# blob past the depth-1 shallow clone. 10 MiB comfortably covers source files.
+_MAX_BLOB_BYTES = 10 * 1024 * 1024
 
 
 def _validate_url(url: str) -> str:
@@ -71,6 +79,7 @@ class RemoteGitSource(ScanSource):
                     "1",
                     "--single-branch",
                     "--no-tags",
+                    f"--filter=blob:limit={_MAX_BLOB_BYTES}",
                     url,
                     str(dest),
                 ],

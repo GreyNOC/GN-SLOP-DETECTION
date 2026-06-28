@@ -7,6 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = Field(default="GN Slop Detection", alias="APP_NAME")
     environment: str = Field(default="development", alias="ENVIRONMENT")
+    # When False (default), the catch-all 500 handler returns a generic message
+    # and keeps the exception type/message server-side in the log. Set true only
+    # for local debugging — exposing internals by default is an info leak.
+    expose_error_detail: bool = Field(default=False, alias="EXPOSE_ERROR_DETAIL")
     slop_alert_threshold: float = Field(default=0.60, alias="SLOP_ALERT_THRESHOLD")
     web_fetch_timeout_seconds: float = Field(default=8.0, alias="WEB_FETCH_TIMEOUT_SECONDS")
     web_fetch_max_bytes: int = Field(default=1_048_576, alias="WEB_FETCH_MAX_BYTES")

@@ -247,7 +247,6 @@ def _parse_png(data: bytes) -> MediaAnalysis:
     analysis = _empty(MediaFormat.PNG, len(data))
     offset = _PNG_SIGNATURE_LEN
     decoded_parts: list[str] = []
-    end_seen = False
     last_chunk_end = offset
 
     while offset + 8 <= len(data):
@@ -301,7 +300,6 @@ def _parse_png(data: bytes) -> MediaAnalysis:
         elif chunk_type == "eXIf":
             analysis.generative_metadata_keys.append("eXIf")
         elif chunk_type == "IEND":
-            end_seen = True
             last_chunk_end = data_end + 4
             offset = last_chunk_end
             break
@@ -309,7 +307,10 @@ def _parse_png(data: bytes) -> MediaAnalysis:
         offset = data_end + 4
         last_chunk_end = offset
 
-    if end_seen and len(data) > last_chunk_end:
+    # Report any bytes beyond the last validly-parsed chunk as trailing, even
+    # when IEND is absent: dropping IEND and appending a payload was otherwise a
+    # free steganography channel (end_seen stayed False so this never fired).
+    if len(data) > last_chunk_end:
         analysis.trailing_bytes = len(data) - last_chunk_end
     analysis.decoded_text_sample = "\n".join(decoded_parts)[:_MAX_DECODED_TEXT]
     return analysis
@@ -319,16 +320,16 @@ def _parse_jpeg(data: bytes) -> MediaAnalysis:
     analysis = _empty(MediaFormat.JPEG, len(data))
     offset = 2  # skip SOI (FF D8)
     decoded_parts: list[str] = []
-    sos_seen = False
+    eoi_end: int | None = None
 
     while offset + 4 <= len(data):
         if data[offset] != 0xFF:
             break
         marker = data[offset + 1]
         if marker == 0xD9:  # EOI
+            eoi_end = offset + 2
             break
         if marker == 0xDA:  # SOS — entropy-coded scan begins
-            sos_seen = True
             p = offset + 2
             while p + 1 < len(data):
                 if data[p] == 0xFF and data[p + 1] != 0x00:
@@ -388,10 +389,12 @@ def _parse_jpeg(data: bytes) -> MediaAnalysis:
 
         offset = data_end
 
-    if sos_seen:
-        eoi = data.rfind(b"\xff\xd9")
-        if 0 <= eoi < len(data) - 2:
-            analysis.trailing_bytes = len(data) - (eoi + 2)
+    # Count everything after the FIRST genuine post-scan EOI as trailing. Using
+    # the marker-walk position (not a whole-buffer rfind of FF D9) means a
+    # payload that itself ends in FF D9 can no longer hide the trailer, and a
+    # metadata-only JPEG with no entropy scan is still checked.
+    if eoi_end is not None and len(data) > eoi_end:
+        analysis.trailing_bytes = len(data) - eoi_end
     analysis.decoded_text_sample = "\n".join(decoded_parts)[:_MAX_DECODED_TEXT]
     return analysis
 
@@ -418,11 +421,15 @@ def _iter_isobmff_boxes(
                 return
             box_size = int.from_bytes(data[offset + 8 : offset + 16], "big")
             header_len = 16
-        if box_size == 0:
+        # box_size == 0 means "extends to the end of the file". Flag it so a
+        # caller can tell a legitimate streamed box from one being used to bury
+        # an appended payload past the real media end.
+        extends_to_eof = box_size == 0
+        if extends_to_eof:
             box_size = safe_end - offset
         if box_size < header_len or offset + box_size > safe_end:
             return
-        yield box_type, offset + header_len, offset + box_size, depth
+        yield box_type, offset + header_len, offset + box_size, depth, extends_to_eof
         if box_type in _ISOBMFF_CONTAINER_BOXES:
             yield from _iter_isobmff_boxes(data, offset + header_len, offset + box_size, depth + 1)
         offset += box_size
@@ -432,14 +439,24 @@ def _parse_isobmff(data: bytes, format_: MediaFormat) -> MediaAnalysis:
     analysis = _empty(format_, len(data))
     decoded_parts: list[str] = []
     last_box_end = 0
+    swallowed_trailer: int | None = None
     # Skip mdat payloads when harvesting text — they're the compressed
     # media stream and decoding them as latin-1 just adds noise. Other
     # leaf boxes get their payloads scraped because tool / writer strings
     # commonly hide in atoms we haven't enumerated explicitly.
     _SKIP_TEXT_HARVEST: Final = frozenset({b"mdat", b"wide", b"free", b"skip", b"junk"})
+    # Filler boxes legitimately should be empty/tiny. A top-level filler box
+    # declared size-0 (extends-to-EOF) is a classic way to bury an appended
+    # payload, so its swallowed span is treated as trailing data. mdat is
+    # excluded — a size-0 mdat is normal for streamed/fragmented MP4.
+    _FILLER_BOXES: Final = frozenset({b"free", b"skip", b"junk", b"wide"})
 
-    for box_type, payload_start, payload_end, _depth in _iter_isobmff_boxes(data, 0, len(data)):
+    for box_type, payload_start, payload_end, _depth, extends_to_eof in _iter_isobmff_boxes(
+        data, 0, len(data)
+    ):
         last_box_end = max(last_box_end, payload_end)
+        if _depth == 0 and extends_to_eof and box_type in _FILLER_BOXES:
+            swallowed_trailer = payload_start
 
         if box_type == b"ftyp":
             brand = _decode_latin1(data, payload_start, min(payload_start + 4, payload_end)).strip()
@@ -481,7 +498,11 @@ def _parse_isobmff(data: bytes, format_: MediaFormat) -> MediaAnalysis:
             # bounded even on files with many small metadata atoms.
             decoded_parts.append(_decode_latin1(data, payload_start, min(payload_end, payload_start + 1024)))
 
-    if last_box_end and last_box_end < len(data):
+    if swallowed_trailer is not None:
+        # A size-0 filler box reports payload_end == EOF, so last_box_end never
+        # flags it; count the span it swallowed (from its payload start) instead.
+        analysis.trailing_bytes = len(data) - swallowed_trailer
+    elif last_box_end and last_box_end < len(data):
         analysis.trailing_bytes = len(data) - last_box_end
     analysis.decoded_text_sample = "\n".join(decoded_parts)[:_MAX_DECODED_TEXT]
     return analysis
@@ -768,12 +789,19 @@ def _parse_webp(data: bytes) -> MediaAnalysis:
         return analysis
     offset = 12
     decoded_parts: list[str] = []
-    while offset + 8 <= len(data):
+    # The RIFF header declares the container size (bytes 4-8). A well-formed
+    # WebP is exactly 8 + that many bytes; anything past it is an appended
+    # payload. Bound the chunk walk to that end so trailing data is neither
+    # scraped into the text sample nor misparsed as a bogus chunk.
+    riff_size = int.from_bytes(data[4:8], "little")
+    declared_end = 8 + riff_size
+    container_end = declared_end if 12 <= declared_end <= len(data) else len(data)
+    while offset + 8 <= container_end:
         tag = data[offset : offset + 4]
         size = int.from_bytes(data[offset + 4 : offset + 8], "little")
         payload_start = offset + 8
         payload_end = payload_start + size
-        if payload_end > len(data):
+        if payload_end > container_end:
             analysis.parse_status = "malformed"
             analysis.parse_warning = (
                 "WebP RIFF chunk size exceeds the file. Stopped at offset "
@@ -800,6 +828,9 @@ def _parse_webp(data: bytes) -> MediaAnalysis:
             analysis.generative_metadata_keys.append("ICCP color profile")
         # Skip the VP8/VP8L/VP8X payloads — they're the compressed image.
         offset = payload_end + (size & 1)  # RIFF aligns chunks to even boundaries
+    # Bytes beyond the RIFF-declared container end are an appended payload.
+    if 12 <= declared_end < len(data):
+        analysis.trailing_bytes = len(data) - declared_end
     analysis.decoded_text_sample = "\n".join(decoded_parts)[:_MAX_DECODED_TEXT]
     return analysis
 
@@ -821,6 +852,7 @@ def _parse_gif(data: bytes) -> MediaAnalysis:
         return analysis
     offset = 13  # GIF header is 6 (sig) + 7 (LSD) bytes
     decoded_parts: list[str] = []
+    trailer_end: int | None = None
     # Skip the Global Color Table if present.
     if offset - 1 < len(data):
         packed = data[10]
@@ -830,6 +862,7 @@ def _parse_gif(data: bytes) -> MediaAnalysis:
     while offset < len(data):
         byte = data[offset]
         if byte == 0x3B:  # trailer
+            trailer_end = offset + 1
             break
         if byte == 0x21:  # extension block
             if offset + 2 >= len(data):
@@ -879,6 +912,11 @@ def _parse_gif(data: bytes) -> MediaAnalysis:
             analysis.parse_status = "malformed"
             analysis.parse_warning = f"Unknown GIF block byte 0x{byte:02x} at offset {offset}."
             break
+    # Only when a clean trailer (0x3B) was reached: bytes after it are an
+    # appended payload. A truncated/malformed GIF leaves trailer_end None and
+    # reports nothing, mirroring the PNG structural gate.
+    if trailer_end is not None and len(data) > trailer_end:
+        analysis.trailing_bytes = len(data) - trailer_end
     analysis.decoded_text_sample = "\n".join(decoded_parts)[:_MAX_DECODED_TEXT]
     return analysis
 

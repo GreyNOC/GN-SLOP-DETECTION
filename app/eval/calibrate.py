@@ -85,7 +85,7 @@ class PerplexityMapping:
 
 
 def fit_perplexity_mapping(
-    perplexities: Sequence[float], labels: Sequence[int], *, l2: float = 1.0
+    perplexities: Sequence[float], labels: Sequence[int], *, l2: float = 0.0
 ) -> PerplexityMapping | None:
     """Fit ``model_detector``'s ``(midpoint, steepness)`` from labeled perplexity.
 
@@ -95,6 +95,10 @@ def fit_perplexity_mapping(
     ``steepness = -1 / coef`` and ``midpoint = -bias / coef``. The fit is only
     valid when ``coef < 0`` (lower perplexity really does map to more AI-like in
     this corpus); otherwise we return ``None`` rather than emit a backwards map.
+
+    The goal here is exact coefficient *recovery*, not predictive shrinkage, so
+    ``l2`` defaults to ``0.0`` — any nonzero penalty shrinks ``coef`` toward zero
+    and so inflates ``steepness = -1/coef`` and biases ``midpoint = -bias/coef``.
     """
     if len(perplexities) != len(labels):
         raise ValueError("perplexities/labels length mismatch")
