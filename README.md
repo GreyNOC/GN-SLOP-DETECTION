@@ -89,6 +89,19 @@ After installing the package, the console script is available as:
 gn-slop text "This article will explore a powerful next-generation solution."
 ```
 
+### Portable CLI executable (Windows, no Python required)
+
+Each Windows release ships a standalone `GreyNOC-Slop-Detection-CLI-<version>.exe`
+on the [Releases page](https://github.com/GreyNOC/GN-SLOP-DETECTION/releases) — a
+single, no-install executable that bundles the analysis engines. Download it and
+run the same commands directly:
+
+```text
+GreyNOC-Slop-Detection-CLI-<version>.exe text "This guaranteed revolutionary solution" --pretty
+GreyNOC-Slop-Detection-CLI-<version>.exe file report.txt
+GreyNOC-Slop-Detection-CLI-<version>.exe url https://example.com
+```
+
 ## Desktop app
 
 Install Electron dependencies and start the desktop shell in development:
@@ -111,7 +124,7 @@ bash scripts/compile-mac.sh
 bash scripts/compile-linux.sh
 ```
 
-Each script installs Python build dependencies, creates a `gn-slop-backend` executable with PyInstaller, installs Electron dependencies, and writes packaged apps to `release/`.
+Each script installs Python build dependencies, creates a `gn-slop-backend` server executable and a standalone `gn-slop` CLI executable with PyInstaller, installs Electron dependencies, and writes packaged apps to `release/`. The Windows build produces a desktop installer, a portable desktop app, and a portable CLI executable.
 
 ## Score meaning
 

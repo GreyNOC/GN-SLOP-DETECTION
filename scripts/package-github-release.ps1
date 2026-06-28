@@ -50,6 +50,14 @@ foreach ($Artifact in $Artifacts) {
     Copy-Item -LiteralPath $Artifact -Destination $ReleaseDir -Force
 }
 
+# Standalone, no-install command-line executable (PyInstaller onefile build of
+# app/cli.py). Renamed into the versioned release naming scheme.
+$CliExe = "dist\gn-slop.exe"
+if (-not (Test-Path $CliExe)) {
+    throw "Missing CLI artifact: $CliExe (build it with PyInstaller before packaging)"
+}
+Copy-Item -LiteralPath $CliExe -Destination (Join-Path $ReleaseDir "$AppName-CLI-$Version.exe") -Force
+
 $UnpackedDir = "release\win-unpacked"
 if (-not (Test-Path $UnpackedDir)) {
     throw "Missing unpacked release directory: $UnpackedDir"
@@ -66,8 +74,17 @@ $Notes = @(
     "## Install",
     "",
     "- Use ``$AppName-Setup-$Version.exe`` for a normal desktop install.",
-    "- Use ``$AppName-Portable-$Version.exe`` for a no-install launch.",
+    "- Use ``$AppName-Portable-$Version.exe`` for a no-install desktop launch.",
+    "- Use ``$AppName-CLI-$Version.exe`` for the portable command-line scanner (no Python required).",
     "- Use ``$AppName-v$Version-win-unpacked.zip`` for a raw unpacked app archive.",
+    "",
+    "### CLI quick start",
+    "",
+    "``````",
+    "$AppName-CLI-$Version.exe text `"This guaranteed revolutionary solution`" --pretty",
+    "$AppName-CLI-$Version.exe file report.txt",
+    "$AppName-CLI-$Version.exe url https://example.com",
+    "``````",
     "",
     "## Verify",
     "",

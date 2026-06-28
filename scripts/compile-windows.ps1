@@ -87,6 +87,39 @@ Get-ChildItem -LiteralPath $BackendBuildDir | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $DesktopBackend -Recurse -Force
 }
 
+Write-Host "Building portable CLI executable..."
+$CliBuildFile = Join-Path $RepoRoot "dist\gn-slop.exe"
+if (Test-Path $CliBuildFile) {
+    Remove-Item -LiteralPath $CliBuildFile -Force
+}
+# Onefile so the result is a single, no-install, no-Python-required executable.
+# The CLI's engine imports are all static (the scanner rules are imported
+# explicitly in rules/__init__.py), so PyInstaller's analysis follows them
+# without --collect-submodules. The heavy, optional ML backends (torch /
+# transformers, only reachable via the model-detector seam, which the CLI never
+# touches) are excluded so the build stays ~25 MB and deterministic even when
+# they happen to be installed in the build environment (otherwise the onefile
+# balloons to multiple GB).
+Invoke-Checked $Python @(
+    "-m",
+    "PyInstaller",
+    "--clean",
+    "--noconfirm",
+    "--onefile",
+    "--name",
+    "gn-slop",
+    "--console",
+    "--exclude-module", "torch",
+    "--exclude-module", "transformers",
+    "--exclude-module", "numpy",
+    "--exclude-module", "scipy",
+    "--exclude-module", "pandas",
+    "app\cli.py"
+)
+if (-not (Test-Path $CliBuildFile)) {
+    throw "Missing CLI executable: $CliBuildFile"
+}
+
 Write-Host "Installing Electron dependencies..."
 Invoke-Checked "npm" @("install")
 
