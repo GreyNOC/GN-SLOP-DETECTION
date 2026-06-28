@@ -44,7 +44,12 @@ def test_netguard_blocks_private_and_transitional(addr):
     assert ip_is_blocked(ipaddress.ip_address(addr)) is True
 
 
-@pytest.mark.parametrize("addr", ["8.8.8.8", "93.184.216.34", "2002:0808:0808::"])
+# NB: a 6to4 wrapper of a *public* IPv4 (2002:0808:0808:: == 6to4 of 8.8.8.8) is
+# intentionally NOT asserted here: Python 3.12's ipaddress marks the whole
+# 2002::/16 block private (IANA special-registry update), so its classification
+# is version-dependent — and blocking deprecated 6to4 is the safe direction
+# anyway. We only assert stable, globally-reachable IPv4.
+@pytest.mark.parametrize("addr", ["8.8.8.8", "93.184.216.34", "1.1.1.1"])
 def test_netguard_allows_public(addr):
     assert ip_is_blocked(ipaddress.ip_address(addr)) is False
 
