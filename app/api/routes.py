@@ -374,6 +374,7 @@ def _scan_result_to_response(result: ScanResult) -> CodeScanResponse:
         suppressed_count=result.suppressed_count,
         rule_errors=list(result.rule_errors),
         redactions_present=bool(result.redacted_findings),
+        pq_readiness=dict(result.pq_readiness),
     )
 
 

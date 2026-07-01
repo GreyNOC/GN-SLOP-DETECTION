@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from app.core.code_scanner.model import ScanRequest, ScanResult, ScanTargetType
+from app.core.code_scanner.pq_readiness import summarize_pq_readiness
 from app.core.code_scanner.redaction import redact_finding_snippets
 from app.core.code_scanner.rules import ALL_RULES
 from app.core.code_scanner.sources import resolve_source
@@ -124,6 +125,7 @@ def scan_target(request: ScanRequest) -> ScanResult:
             suppressed_count=suppressed_count,
             rule_errors=rule_errors[:50],
         )
+        result.pq_readiness = summarize_pq_readiness(result.findings)
         result.compute_score()
 
         if request.target_type == ScanTargetType.PATH:

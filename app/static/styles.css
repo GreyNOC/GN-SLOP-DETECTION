@@ -768,9 +768,20 @@ textarea:focus {
 
 .ai-verdict-badge.high,
 .ai-verdict-badge.slop,
-.ai-verdict-badge.likely_ai_generated {
+.ai-verdict-badge.likely_ai_generated,
+.ai-verdict-badge.quantum_vulnerable {
   border-color: var(--red);
   color: var(--red);
+}
+
+.ai-verdict-badge.pq_ready {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.ai-verdict-badge.migration_in_progress {
+  border-color: var(--amber);
+  color: var(--amber);
 }
 
 .ai-verdict-note {

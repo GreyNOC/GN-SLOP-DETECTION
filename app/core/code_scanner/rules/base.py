@@ -106,6 +106,14 @@ class RegexRule(Rule):
     # include any of these substrings. Used to suppress obvious
     # false-positive contexts (e.g. comments saying "this is fake").
     line_must_not_contain: tuple[str, ...] = ()
+    # Optional fourth filter: like line_must_not_contain, but checked
+    # over a window from the start of the match's line through the
+    # following ``nearby_window_chars`` characters. Needed when the
+    # suppressing token can sit on a *later* line than the match —
+    # e.g. a multi-line Go slice literal whose hybrid PQ group name
+    # appears one line below the ``CurvePreferences:`` anchor.
+    nearby_must_not_contain: tuple[str, ...] = ()
+    nearby_window_chars: int = 240
 
     def _compiled(self) -> re.Pattern[str]:
         return re.compile(self.pattern, self.flags)
@@ -127,6 +135,11 @@ class RegexRule(Rule):
                 token in line for token in self.line_must_not_contain
             ):
                 continue
+            if self.nearby_must_not_contain:
+                window_start = text.rfind("\n", 0, match.start()) + 1
+                window = text[window_start : match.start() + self.nearby_window_chars]
+                if any(token in window for token in self.nearby_must_not_contain):
+                    continue
             snippet = _snippet_around(text, match)
             if self.unique:
                 key = (snippet, path)

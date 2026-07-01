@@ -1,4 +1,4 @@
-from typing import Final
+from typing import Any, Final
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -321,3 +321,7 @@ class CodeScanResponse(BaseModel):
     suppressed_count: int = 0
     rule_errors: list[dict[str, str]] = Field(default_factory=list)
     redactions_present: bool = False
+    pq_readiness: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Post-quantum readiness roll-up built from the pqc.* findings.",
+    )

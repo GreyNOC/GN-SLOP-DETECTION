@@ -209,6 +209,7 @@ def _scan_result_to_payload(result: ScanResult) -> dict[str, Any]:
         "score": result.score,
         "risk": result.risk,
         "recommendation": result.recommendation,
+        "pq_readiness": dict(result.pq_readiness),
         "git_metadata": dict(result.git_metadata),
         "findings": [
             {
@@ -263,6 +264,14 @@ def scan_code_command(args: argparse.Namespace) -> int:
         f"Bytes: {result.bytes_scanned}  Time: {result.elapsed_seconds:.2f}s"
     )
     print(f"Risk: {result.risk.upper()}  Score: {result.score:.3f}")
+    pq = result.pq_readiness
+    if pq and pq.get("status") != "no_crypto_detected":
+        print(
+            f"PQ readiness: {pq.get('status')}  "
+            f"(HNDL exposure: {pq.get('hndl_exposure', 0)}, "
+            f"classical: {pq.get('classical_findings', 0)}, "
+            f"PQC: {pq.get('pqc_findings', 0)})"
+        )
     if result.findings:
         print("Findings:")
         for finding in result.findings[:25]:

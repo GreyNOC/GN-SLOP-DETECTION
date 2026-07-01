@@ -195,6 +195,40 @@ characters, Cyrillic/Greek homoglyphs, bidi controls). Obfuscated text is both
 flagged (`evasion_obfuscation` signal) and de-obfuscated before matching, so
 hiding a flagged word behind lookalike characters no longer defeats detection.
 
+## Post-quantum (PQ) readiness scanning
+
+The code scanner includes a `pqc` rule pack that builds a crypto inventory for
+the post-quantum transition: quantum-vulnerable primitives (RSA, ECDH/DH key
+exchange, ECDSA/EdDSA/DSA signatures, pinned JWT algorithms), TLS/SSH configs
+that pin classical-only groups (opting out of the hybrid key exchange modern
+stacks negotiate by default), asymmetric keys ≤ 1024 bits, AES-128/192
+selection, and — as positive signals — PQC adoption (ML-KEM, ML-DSA, SLH-DSA,
+liboqs) plus parameter sets below NIST security category 3.
+
+Severity is calibrated to migration urgency: key establishment scores
+`medium` because recorded traffic is harvest-now-decrypt-later exposed, while
+signatures score `low` (no retroactive break). Hybrid-aware configs (e.g.
+`X25519MLKEM768`, `sntrup761x25519` — including multi-line group lists) are
+not flagged. PQ inventory findings are dampened in the composite risk score:
+a codebase full of today-standard RSA/ECDH stays in the low band, while
+genuinely weak crypto (keys ≤ 1024 bits) counts at full weight.
+
+Every scan response includes a `pq_readiness` roll-up:
+
+```json
+{
+  "status": "quantum_vulnerable | migration_in_progress | pq_ready | symmetric_margin_only | no_crypto_detected",
+  "hndl_exposure": 4,
+  "classical_findings": 6,
+  "pqc_findings": 0,
+  "families": {"rsa": 2, "key_exchange_config": 1, "signature": 2},
+  "recommendation": "..."
+}
+```
+
+The CLI prints a one-line summary (`PQ readiness: quantum_vulnerable ...`)
+and the findings flow into SARIF exports like every other rule pack.
+
 ## Project layout
 
 ```text
@@ -235,4 +269,5 @@ docker run -p 8000:8000 gn-slop-detection
 - Add evidence export for case notes
 
 Done: pluggable ML detector interface (perplexity + Binoculars), evaluation
-harness with calibration and learned weights, adversarial-evasion resistance.
+harness with calibration and learned weights, adversarial-evasion resistance,
+post-quantum readiness scanning (`pqc` rule pack + `pq_readiness` roll-up).
