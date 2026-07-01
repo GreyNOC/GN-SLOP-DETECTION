@@ -15,6 +15,7 @@ from app.core.code_scanner.rules.crypto import RULES as CRYPTO_RULES
 from app.core.code_scanner.rules.deps import RULES as DEP_RULES
 from app.core.code_scanner.rules.eval_exec import RULES as EVAL_RULES
 from app.core.code_scanner.rules.network import RULES as NETWORK_RULES
+from app.core.code_scanner.rules.pqc import RULES as PQC_RULES
 from app.core.code_scanner.rules.secrets import RULES as SECRET_RULES
 
 ALL_RULES: tuple[Rule, ...] = (
@@ -23,6 +24,7 @@ ALL_RULES: tuple[Rule, ...] = (
     *CMD_RULES,
     *NETWORK_RULES,
     *CRYPTO_RULES,
+    *PQC_RULES,
     *CI_RULES,
     *BACKDOOR_RULES,
     *DEP_RULES,

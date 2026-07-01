@@ -68,6 +68,7 @@ const aiLlmProvider = document.querySelector("#aiLlmProvider");
 const aiLlmModel = document.querySelector("#aiLlmModel");
 const aiLlmKey = document.querySelector("#aiLlmKey");
 const aiVerdict = document.querySelector("#aiVerdict");
+const pqReadiness = document.querySelector("#pqReadiness");
 const dialLabel = document.querySelector("#dialLabel");
 const mediaNote = document.querySelector("#mediaNote");
 
@@ -411,6 +412,7 @@ function renderMediaResult(payload) {
     mediaNote.hidden = false;
   }
 
+  renderPqReadiness(null);
   renderAiVerdict(payload);
 }
 
@@ -434,6 +436,7 @@ function renderResult(payload) {
   if (findingsActions) findingsActions.hidden = true;
   lastCodePayload = null;
   resetScoreFraming();
+  renderPqReadiness(null);
   renderSource(payload);
   renderDimensions(payload.dimensions || []);
   renderProfile(payload.profile);
@@ -695,6 +698,34 @@ function renderAiVerdict(payload) {
   aiVerdict.hidden = false;
 }
 
+function renderPqReadiness(pq) {
+  if (!pqReadiness) return;
+  if (!pq || !pq.status || pq.status === "no_crypto_detected") {
+    pqReadiness.hidden = true;
+    pqReadiness.innerHTML = "";
+    return;
+  }
+  const families = pq.families || {};
+  const familyBadges = Object.entries(families)
+    .map(
+      ([name, count]) =>
+        `<span class="ai-verdict-badge">${escapeHtml(formatSignalName(name))}: ${escapeHtml(String(count))}</span>`,
+    )
+    .join("");
+  pqReadiness.innerHTML = `
+    <span class="ai-verdict-title">Post-quantum readiness</span>
+    <div class="ai-verdict-row">
+      <span class="ai-verdict-badge ${escapeHtml(pq.status)}">${escapeHtml(formatSignalName(pq.status))}</span>
+      <span class="ai-verdict-badge">Harvest-now-decrypt-later: ${escapeHtml(String(pq.hndl_exposure ?? 0))}</span>
+      <span class="ai-verdict-badge">Classical: ${escapeHtml(String(pq.classical_findings ?? 0))}</span>
+      <span class="ai-verdict-badge">PQC: ${escapeHtml(String(pq.pqc_findings ?? 0))}</span>
+    </div>
+    ${familyBadges ? `<div class="ai-verdict-row">${familyBadges}</div>` : ""}
+    ${pq.recommendation ? `<p class="ai-verdict-note">${escapeHtml(pq.recommendation)}</p>` : ""}
+  `;
+  pqReadiness.hidden = false;
+}
+
 function setSignalsHeaders(labels) {
   if (!signalsTableHead) return;
   signalsTableHead.innerHTML = `
@@ -828,6 +859,7 @@ function renderCodeResult(payload) {
   dimensionGrid.innerHTML =
     '<div class="empty-block">Dimension scores apply to text analysis only.</div>';
   resetScoreFraming();
+  renderPqReadiness(payload.pq_readiness);
   if (aiVerdict) {
     aiVerdict.hidden = true;
     aiVerdict.innerHTML = "";

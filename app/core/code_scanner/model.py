@@ -104,6 +104,9 @@ class ScanResult:
     redacted_findings: set[str] = field(default_factory=set)
     suppressed_count: int = 0
     rule_errors: list[dict[str, str]] = field(default_factory=list)
+    # Post-quantum readiness roll-up built from the pqc.* findings by
+    # app.core.code_scanner.pq_readiness.summarize_pq_readiness.
+    pq_readiness: dict[str, object] = field(default_factory=dict)
     score: float = 0.0
     risk: str = "low"
     recommendation: str = ""
@@ -120,7 +123,16 @@ class ScanResult:
         import math
 
         denominator = max(1.0, math.sqrt(self.files_scanned))
-        raw = sum(finding_score(f.severity, f.confidence) for f in self.findings) / denominator
+        # Category "pqc" findings are migration *inventory*, not
+        # "suspicious code": a module full of today-standard RSA-4096 /
+        # X25519 must not score like a backdoor. They contribute at a
+        # quarter weight so heavy classical-crypto use stays visible
+        # without flipping risk bands; genuinely weak crypto (e.g.
+        # RSA-1024) is category "crypto" and counts fully.
+        raw = sum(
+            finding_score(f.severity, f.confidence) * (0.25 if f.category == "pqc" else 1.0)
+            for f in self.findings
+        ) / denominator
         # Severity / category floors. A single high-confidence secret or
         # critical backdoor / CI exfil pushes the composite into high
         # risk regardless of how many clean files dilute the average.
